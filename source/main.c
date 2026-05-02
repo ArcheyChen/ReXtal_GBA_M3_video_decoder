@@ -9,7 +9,7 @@
  * - A/V sync every 600 frames (1 minute) at I-frames
  * - A button to pause/resume
  * - L/R buttons for seeking by minute
- * - START button to restart from beginning
+ * - SELECT/START menu for resume, restart, and copyright notice
  */
 
 #include <gba.h>
@@ -74,6 +74,7 @@ static uint32_t video_size = 0;
 // current_frame: maintained by main loop, represents "have decoded this many frames"
 static volatile u32 target_frame = 0;
 static u32 current_frame = 0;
+static u32 total_frames = 0;
 
 // For tracking current minute (for sync and seeking)
 static u32 current_minute = 0;
@@ -81,6 +82,9 @@ static bool decoded_frame_invalidated = false;
 
 // Pause state
 static bool is_paused = false;
+static bool menu_requested = false;
+
+#define CONSOLE_COLS 30
 
 static void vblank_handler(void) {
     // Called at 60 Hz, increment target_frame every 6 VBlanks (10 FPS)
@@ -132,6 +136,44 @@ static void show_info(void) {
     iprintf("\nStarting playback...\n");
 }
 
+static void print_centered(const char* text) {
+    int len = (int)strlen(text);
+    int pad = 0;
+    if (len < CONSOLE_COLS) {
+        pad = (CONSOLE_COLS - len) / 2;
+    }
+    for (int i = 0; i < pad; i++) {
+        iprintf(" ");
+    }
+    iprintf("%s\n", text);
+}
+
+static void format_time(u32 frames, char* out) {
+    u32 seconds = frames / 10;
+    u32 minutes = seconds / 60;
+    seconds -= minutes * 60;
+    if (minutes > 99) {
+        u32 hours = minutes / 60;
+        minutes -= hours * 60;
+        if (hours > 9) hours = 9;
+        out[0] = '0' + hours;
+        out[1] = ':';
+        out[2] = '0' + (minutes / 10);
+        out[3] = '0' + (minutes % 10);
+        out[4] = ':';
+        out[5] = '0' + (seconds / 10);
+        out[6] = '0' + (seconds % 10);
+        out[7] = 0;
+    } else {
+        out[0] = '0' + (minutes / 10);
+        out[1] = '0' + (minutes % 10);
+        out[2] = ':';
+        out[3] = '0' + (seconds / 10);
+        out[4] = '0' + (seconds % 10);
+        out[5] = 0;
+    }
+}
+
 static void init_video_display(void) {
     // Mode 3: 240x160, 15-bit color
     SetMode(MODE_3 | BG2_ENABLE);
@@ -146,6 +188,13 @@ static void init_video_display(void) {
     }
 }
 
+static void restore_video_display(void) {
+    SetMode(MODE_3 | BG2_ENABLE);
+    if (has_video) {
+        copy_frame_to_vram(frame_buffer, (void*)0x06000000, 240 * 160 * 2);
+    }
+}
+
 // Pre-calculated I-frame offsets (one per minute)
 // Maximum 256 minutes (~4 hours) should be enough
 #define MAX_MINUTES 256
@@ -156,6 +205,7 @@ static u32 total_minutes = 0;
 static void scan_iframe_offsets(void) {
     if (use_banked_video) {
         total_minutes = banked_video_minute_count();
+        total_frames = banked_video_frame_count();
         return;
     }
     if (!has_video || !video_data) return;
@@ -180,6 +230,7 @@ static void scan_iframe_offsets(void) {
     }
 
     total_minutes = minute;
+    total_frames = frame_count;
 }
 
 // Seek video to a specific minute (jumps to I-frame)
@@ -240,6 +291,161 @@ static void toggle_pause(void) {
             gbs_audio_pause();
         }
     }
+}
+
+static void set_pause_state(bool pause) {
+    if (is_paused == pause) return;
+    toggle_pause();
+}
+
+static void wait_for_key_release(void) {
+    do {
+        VBlankIntrWait();
+        scanKeys();
+    } while (keysHeld());
+}
+
+static void show_copyright_notice(void) {
+    iprintf("\x1b[2J");
+    print_centered("ReXtal:Ausar's M3");
+    print_centered("movie decoder");
+    print_centered("================");
+    iprintf("\n\n");
+    print_centered("Free to use.");
+    print_centered("Commercial use prohibited.");
+    iprintf("\n");
+    print_centered("Author: Ausar");
+    print_centered("GitHub: archeychen");
+    iprintf("\n\n");
+    print_centered("A/B/SELECT: Return");
+
+    wait_for_key_release();
+    while (1) {
+        VBlankIntrWait();
+        scanKeys();
+        u16 keys = keysDown();
+        if (keys & (KEY_A | KEY_B | KEY_SELECT | KEY_START)) {
+            wait_for_key_release();
+            return;
+        }
+    }
+}
+
+typedef enum {
+    MENU_ACTION_RESUME = 0,
+    MENU_ACTION_RESTART = 1,
+} MenuAction;
+
+static void draw_pause_menu(u32 selected) {
+    char elapsed[8];
+    char total[8];
+    char status[24];
+    format_time(current_frame, elapsed);
+    format_time(total_frames, total);
+    snprintf(status, sizeof(status), "%s / %s", elapsed, total);
+
+    iprintf("\x1b[2J");
+    print_centered("ReXtal:Ausar's M3");
+    print_centered("movie decoder");
+    print_centered("================");
+    iprintf("\n");
+    print_centered(status);
+    iprintf("\n");
+    print_centered(selected == 0 ? "> Resume playback" : "  Resume playback");
+    print_centered(selected == 1 ? "> Restart from beginning" : "  Restart from beginning");
+    print_centered(selected == 2 ? "> Copyright notice" : "  Copyright notice");
+    iprintf("\n\n");
+    print_centered("UP/DOWN: Move");
+    print_centered("A: Select  B: Resume");
+}
+
+static MenuAction show_pause_menu(void) {
+    set_pause_state(true);
+    consoleDemoInit();
+    wait_for_key_release();
+
+    u32 selected = 0;
+    draw_pause_menu(selected);
+
+    while (1) {
+        VBlankIntrWait();
+        scanKeys();
+        u16 keys = keysDown();
+
+        if (keys & KEY_UP) {
+            selected = (selected + 2) % 3;
+            draw_pause_menu(selected);
+        } else if (keys & KEY_DOWN) {
+            selected = (selected + 1) % 3;
+            draw_pause_menu(selected);
+        }
+
+        if (keys & (KEY_B | KEY_SELECT)) {
+            wait_for_key_release();
+            return MENU_ACTION_RESUME;
+        }
+
+        if (keys & KEY_A) {
+            wait_for_key_release();
+            if (selected == 0) {
+                return MENU_ACTION_RESUME;
+            }
+            if (selected == 1) {
+                return MENU_ACTION_RESTART;
+            }
+            show_copyright_notice();
+            draw_pause_menu(selected);
+        }
+    }
+}
+
+static void update_current_minute_after_display(void) {
+    if (use_banked_video) {
+        u32 minute_count = banked_video_minute_count();
+        u32 minute = current_frame / FRAMES_PER_MINUTE;
+        if (minute_count > 0 && minute >= minute_count) {
+            minute = minute_count - 1;
+        }
+        current_minute = minute;
+    } else {
+        u32 frame = current_frame;
+        current_minute = 0;
+        while (frame >= FRAMES_PER_MINUTE) {
+            frame -= FRAMES_PER_MINUTE;
+            current_minute++;
+        }
+    }
+}
+
+static void display_decoded_frame(void) {
+    copy_frame_to_vram(frame_buffer, (void*)0x06000000, 240 * 160 * 2);
+    current_frame++;
+    update_current_minute_after_display();
+}
+
+static bool run_pause_menu_after_stable_frame(void) {
+    menu_requested = false;
+    MenuAction action = show_pause_menu();
+    if (action == MENU_ACTION_RESTART) {
+        seek_to_minute(0);
+        init_video_display();
+        set_pause_state(false);
+        return true;
+    }
+
+    restore_video_display();
+    set_pause_state(false);
+    return false;
+}
+
+static void run_pause_menu_audio_only(void) {
+    menu_requested = false;
+    MenuAction action = show_pause_menu();
+    if (action == MENU_ACTION_RESTART) {
+        seek_to_minute(0);
+    }
+    set_pause_state(false);
+    show_info();
 }
 
 // Decode next frame into frame_buffer (does not display)
@@ -322,12 +528,10 @@ static bool handle_input(void) {
         return true;
     }
 
-    // START: restart from beginning
-    if (keys & KEY_START) {
-        if (is_paused) {
-            toggle_pause();  // Resume first
-        }
-        seek_to_minute(0);
+    // SELECT/START: open pause menu. Restart is inside the menu to avoid mis-taps.
+    if (keys & (KEY_SELECT | KEY_START)) {
+        menu_requested = true;
+        return false;
     }
 
     // R: skip forward 1 minute
@@ -376,27 +580,18 @@ static void process_video(void) {
         if (decoded_frame_invalidated) {
             return;
         }
+        if (menu_requested) {
+            display_decoded_frame();
+            run_pause_menu_after_stable_frame();
+            return;
+        }
     }
 
     // Display the pre-decoded frame
-    copy_frame_to_vram(frame_buffer, (void*)0x06000000, 240 * 160 * 2);
-    current_frame++;
+    display_decoded_frame();
 
-    // Update current minute (using subtraction loop instead of division)
-    if (use_banked_video) {
-        u32 minute_count = banked_video_minute_count();
-        u32 minute = current_frame / FRAMES_PER_MINUTE;
-        if (minute_count > 0 && minute >= minute_count) {
-            minute = minute_count - 1;
-        }
-        current_minute = minute;
-    } else {
-        u32 frame = current_frame;
-        current_minute = 0;
-        while (frame >= FRAMES_PER_MINUTE) {
-            frame -= FRAMES_PER_MINUTE;
-            current_minute++;
-        }
+    if (menu_requested) {
+        run_pause_menu_after_stable_frame();
     }
 }
 
@@ -493,6 +688,9 @@ int main(void) {
                 gbs_audio_update();
             }
             handle_input();
+            if (menu_requested) {
+                run_pause_menu_audio_only();
+            }
         }
 
         // Handle audio looping
