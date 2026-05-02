@@ -333,8 +333,10 @@ typedef struct {
     char marker[4];         // "MUSI"
     uint32_t reserved1;
     uint32_t mode;
-    uint32_t reserved2[59]; // Padding to 0x200
+    uint32_t reserved2[123]; // Padding to 0x200
 } __attribute__((packed)) GbsHeader;
+
+typedef char GbsHeader_must_be_0x200[(sizeof(GbsHeader) == GBS_HEADER_SIZE) ? 1 : -1];
 
 static uint8_t obfuscated_gbs_header_key(uint32_t index) {
     uint32_t value = 0x47425352u + index * 0x1f3du;
