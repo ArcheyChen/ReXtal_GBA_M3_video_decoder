@@ -359,6 +359,7 @@ int main(int argc, char** argv) {
 
     M3VHeader header;
     memset(&header, 0, sizeof(header));
+    const uint32_t output_size = align4(rom_offset);
     memcpy(header.magic, "M3V0", 4);
     header.version = 1;
     header.header_size = sizeof(M3VHeader);
@@ -371,7 +372,7 @@ int main(int argc, char** argv) {
     header.minute_index_offset = minute_index_offset;
     header.video_data_start = M3V_DATA_START;
     header.video_data_end = video_data_end;
-    header.rom_size = rom_size;
+    header.rom_size = output_size;
     header.audio_header_offset = audio_header_offset;
     header.audio_block_offset = audio_block_offset;
     header.audio_size = gbs_size;
@@ -391,12 +392,12 @@ int main(int argc, char** argv) {
         free(minute_frames);
         return 1;
     }
-    fwrite(rom, 1, rom_size, out);
+    fwrite(rom, 1, output_size, out);
     fclose(out);
 
     printf("Created: %s\n", out_path);
-    printf("  rom=%u MiB frames=%u minutes=%u audio=%s used=%u bytes\n",
-           rom_mb, frame_count, minute_count, gbs ? "yes" : "no", rom_offset);
+    printf("  capacity=%u MiB frames=%u minutes=%u audio=%s used=%u bytes\n",
+           rom_mb, frame_count, minute_count, gbs ? "yes" : "no", output_size);
 
     free(player);
     free(gbm);
