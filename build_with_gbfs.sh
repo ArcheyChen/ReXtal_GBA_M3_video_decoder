@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Build GBA ROM with GBFS media archive
+# Build multibank GBA ROM with GBFS media archive
 #
 # Usage: ./build_with_gbfs.sh <video.gbm> <audio.gbs>
 #        ./build_with_gbfs.sh <video.gbm>
@@ -95,7 +95,7 @@ if [ -n "$GBS_FILE" ]; then
 fi
 
 # Output filename
-INPUT_ROM="M3_Movie_Player.gba"
+INPUT_ROM="M3_Movie_Player_mb.gba"
 OUTPUT_ROM="M3_Movie_Player_output.gba"
 
 # Copy ROM to output file (preserve original)

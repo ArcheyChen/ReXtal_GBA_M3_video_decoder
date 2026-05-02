@@ -20,11 +20,7 @@ include $(DEVKITARM)/gba_rules
 # the makefile is found
 #
 #---------------------------------------------------------------------------------
-ifeq ($(MULTIBANK),1)
 TARGET		:= M3_Movie_Player_mb
-else
-TARGET		:= M3_Movie_Player
-endif
 BUILD		:= build
 SOURCES		:= source gbfs
 INCLUDES	:= include
@@ -124,7 +120,7 @@ $(BUILD):
 #---------------------------------------------------------------------------------
 clean:
 	@echo clean ...
-	@rm -fr $(BUILD) $(TARGET).elf $(TARGET).gba
+	@rm -fr $(BUILD) M3_Movie_Player_mb.elf M3_Movie_Player_mb.gba M3_Movie_Player.elf M3_Movie_Player.gba
 
 
 #---------------------------------------------------------------------------------

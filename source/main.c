@@ -85,6 +85,7 @@ static bool is_paused = false;
 static bool menu_requested = false;
 
 #define CONSOLE_COLS 30
+#define MENU_LEFT_PAD 7
 
 static void vblank_handler(void) {
     // Called at 60 Hz, increment target_frame every 6 VBlanks (10 FPS)
@@ -143,6 +144,17 @@ static void print_centered(const char* text) {
         pad = (CONSOLE_COLS - len) / 2;
     }
     for (int i = 0; i < pad; i++) {
+        iprintf(" ");
+    }
+    iprintf("%s\n", text);
+}
+
+static void print_separator(void) {
+    iprintf("==============================\n");
+}
+
+static void print_menu_line(const char* text) {
+    for (int i = 0; i < MENU_LEFT_PAD; i++) {
         iprintf(" ");
     }
     iprintf("%s\n", text);
@@ -307,9 +319,8 @@ static void wait_for_key_release(void) {
 
 static void show_copyright_notice(void) {
     iprintf("\x1b[2J");
-    print_centered("ReXtal:Ausar's M3");
-    print_centered("movie decoder");
-    print_centered("================");
+    print_centered("ReXtal:Ausar's M3 Decoder");
+    print_separator();
     iprintf("\n\n");
     print_centered("Free to use.");
     print_centered("Commercial use prohibited.");
@@ -345,16 +356,15 @@ static void draw_pause_menu(u32 selected) {
     snprintf(status, sizeof(status), "%s / %s", elapsed, total);
 
     iprintf("\x1b[2J");
-    print_centered("ReXtal:Ausar's M3");
-    print_centered("movie decoder");
-    print_centered("================");
+    print_centered("ReXtal:Ausar's M3 Decoder");
+    print_separator();
     iprintf("\n");
     print_centered(status);
-    iprintf("\n");
-    print_centered(selected == 0 ? "> Resume playback" : "  Resume playback");
-    print_centered(selected == 1 ? "> Restart from beginning" : "  Restart from beginning");
-    print_centered(selected == 2 ? "> Copyright notice" : "  Copyright notice");
     iprintf("\n\n");
+    print_menu_line(selected == 0 ? "> Resume" : "  Resume");
+    print_menu_line(selected == 1 ? "> Restart" : "  Restart");
+    print_menu_line(selected == 2 ? "> Copyright" : "  Copyright");
+    iprintf("\n\n\n");
     print_centered("UP/DOWN: Move");
     print_centered("A: Select  B: Resume");
 }
