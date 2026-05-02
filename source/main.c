@@ -83,11 +83,22 @@ static bool decoded_frame_invalidated = false;
 // Pause state
 static bool is_paused = false;
 static bool menu_requested = false;
+static volatile u16 input_down_latch = 0;
+static volatile u16 input_held_snapshot = 0;
 
 #define CONSOLE_COLS 30
 #define MENU_LEFT_PAD 7
+#define INPUT_KEY_MASK 0x03ffu
+
+static u16 read_raw_keys_held(void) {
+    return (u16)((~REG_KEYINPUT) & INPUT_KEY_MASK);
+}
 
 static void vblank_handler(void) {
+    u16 held = read_raw_keys_held();
+    input_down_latch |= (u16)(held & ~input_held_snapshot);
+    input_held_snapshot = held;
+
     // Called at 60 Hz, increment target_frame every 6 VBlanks (10 FPS)
     // Don't increment when paused
     if (is_paused) return;
@@ -98,6 +109,24 @@ static void vblank_handler(void) {
         vblank_counter = 0;
         target_frame++;
     }
+}
+
+static u16 consume_input_down(void) {
+    u16 keys;
+    u16 old_ime = REG_IME;
+    REG_IME = 0;
+    keys = input_down_latch;
+    input_down_latch = 0;
+    REG_IME = old_ime;
+    return keys;
+}
+
+static void clear_input_latch(void) {
+    u16 old_ime = REG_IME;
+    REG_IME = 0;
+    input_down_latch = 0;
+    input_held_snapshot = read_raw_keys_held();
+    REG_IME = old_ime;
 }
 
 static void show_error(const char* msg) {
@@ -383,6 +412,7 @@ static void wait_for_key_release(void) {
         VBlankIntrWait();
         scanKeys();
     } while (keysHeld());
+    clear_input_latch();
 }
 
 static void show_copyright_notice(void) {
@@ -617,8 +647,10 @@ static void check_audio_sync(void) {
 
 // Handle input, returns true if pause state changed
 static bool handle_input(void) {
-    scanKeys();
-    u16 keys = keysDown();
+    u16 keys = consume_input_down();
+    if (!keys) {
+        return false;
+    }
 
     // A: toggle pause/resume
     if (keys & KEY_A) {
@@ -652,11 +684,52 @@ static bool handle_input(void) {
     return false;
 }
 
+static bool consume_frame_invalidated(void) {
+    if (!decoded_frame_invalidated) {
+        return false;
+    }
+    decoded_frame_invalidated = false;
+    return true;
+}
+
+static bool service_pause_or_menu(void) {
+    if (menu_requested) {
+        run_pause_menu_after_stable_frame();
+        return true;
+    }
+
+    while (is_paused) {
+        VBlankIntrWait();
+        if (has_audio) {
+            gbs_audio_update();
+        }
+        handle_input();
+        if (decoded_frame_invalidated) {
+            decoded_frame_invalidated = false;
+            return true;
+        }
+        if (menu_requested) {
+            run_pause_menu_after_stable_frame();
+            return true;
+        }
+    }
+
+    return false;
+}
+
 // Process video frames with frame rate control
 // Flow: decode -> wait for timing -> display -> repeat
 static void process_video(void) {
     if (has_audio) {
         gbs_audio_update();
+    }
+
+    if (consume_frame_invalidated()) {
+        return;
+    }
+    handle_input();
+    if (consume_frame_invalidated() || service_pause_or_menu()) {
+        return;
     }
 
     // Decode next frame first (into frame_buffer)
@@ -667,6 +740,16 @@ static void process_video(void) {
         gbs_audio_update();
     }
 
+    handle_input();
+    if (consume_frame_invalidated()) {
+        return;
+    }
+    if (menu_requested || is_paused) {
+        display_decoded_frame();
+        service_pause_or_menu();
+        return;
+    }
+
     // Wait until it's time to display
     // Also check input during wait so pause can be toggled
     while (current_frame >= target_frame) {
@@ -675,12 +758,15 @@ static void process_video(void) {
             gbs_audio_update();
         }
         handle_input();
-        if (decoded_frame_invalidated) {
+        if (consume_frame_invalidated()) {
             return;
         }
         if (menu_requested) {
             display_decoded_frame();
             run_pause_menu_after_stable_frame();
+            return;
+        }
+        if (is_paused && service_pause_or_menu()) {
             return;
         }
     }
