@@ -83,6 +83,7 @@ static bool decoded_frame_invalidated = false;
 // Pause state
 static bool is_paused = false;
 static bool menu_requested = false;
+static bool resume_audio_after_seek_frame = false;
 static volatile u16 input_down_latch = 0;
 static volatile u16 input_held_snapshot = 0;
 
@@ -374,12 +375,19 @@ static void seek_to_minute(u32 minute) {
         minute = total_minutes - 1;
     }
 
+    bool resume_after_video_frame = false;
     if (has_video) {
         video_seek_minute(minute);
+        resume_after_video_frame = has_audio && !is_paused;
     }
 
     if (has_audio) {
-        gbs_audio_seek_minute(minute);
+        if (has_video) {
+            gbs_audio_seek_minute_paused(minute);
+            resume_audio_after_seek_frame = resume_after_video_frame;
+        } else {
+            gbs_audio_seek_minute(minute);
+        }
     }
 
     current_minute = minute;
@@ -693,11 +701,24 @@ static bool handle_input(void) {
     return false;
 }
 
-static bool consume_frame_invalidated(void) {
+static void resume_audio_after_seek_frame_if_needed(void) {
+    if (resume_audio_after_seek_frame) {
+        resume_audio_after_seek_frame = false;
+        if (has_audio && !is_paused) {
+            gbs_audio_resume();
+        }
+    }
+}
+
+static bool display_invalidated_frame(void) {
     if (!decoded_frame_invalidated) {
         return false;
     }
+
     decoded_frame_invalidated = false;
+    decode_next_frame();
+    display_decoded_frame();
+    resume_audio_after_seek_frame_if_needed();
     return true;
 }
 
@@ -713,8 +734,7 @@ static bool service_pause_or_menu(void) {
             gbs_audio_update();
         }
         handle_input();
-        if (decoded_frame_invalidated) {
-            decoded_frame_invalidated = false;
+        if (display_invalidated_frame()) {
             return true;
         }
         if (menu_requested) {
@@ -733,11 +753,11 @@ static void process_video(void) {
         gbs_audio_update();
     }
 
-    if (consume_frame_invalidated()) {
+    if (display_invalidated_frame()) {
         return;
     }
     handle_input();
-    if (consume_frame_invalidated() || service_pause_or_menu()) {
+    if (display_invalidated_frame() || service_pause_or_menu()) {
         return;
     }
 
@@ -750,7 +770,7 @@ static void process_video(void) {
     }
 
     handle_input();
-    if (consume_frame_invalidated()) {
+    if (display_invalidated_frame()) {
         return;
     }
     if (menu_requested || is_paused) {
@@ -767,7 +787,7 @@ static void process_video(void) {
             gbs_audio_update();
         }
         handle_input();
-        if (consume_frame_invalidated()) {
+        if (display_invalidated_frame()) {
             return;
         }
         if (menu_requested) {

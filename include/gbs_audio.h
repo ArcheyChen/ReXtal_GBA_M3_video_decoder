@@ -126,6 +126,14 @@ void gbs_audio_shutdown(void);
 void gbs_audio_seek_minute(uint32_t minute);
 
 /*
+ * Seek to a specific minute and leave audio paused with buffers primed.
+ * Call gbs_audio_resume() when the matching video frame is visible.
+ *
+ * @param minute  Target minute (0-based)
+ */
+void gbs_audio_seek_minute_paused(uint32_t minute);
+
+/*
  * Get current playback position in minutes.
  */
 uint32_t gbs_audio_get_current_minute(void);

@@ -1131,11 +1131,7 @@ bool gbs_audio_init_banked(uint32_t header_offset, uint32_t block_offset, uint32
     return ok;
 }
 
-void gbs_audio_start(void) {
-    if (state.info.mode == GBS_MODE_INVALID || state.info.is_finished) {
-        return;
-    }
-
+static void prime_audio_buffers(void) {
     cache_fill_blocks(GBS_BLOCK_CACHE_BLOCKS);
 
     // Pre-decode both buffers
@@ -1148,6 +1144,12 @@ void gbs_audio_start(void) {
     cache_fill_blocks(GBS_BLOCK_CACHE_BLOCKS);
 
     state.active_buffer = 0;
+}
+
+static void start_audio_hardware(void) {
+    if (state.info.mode == GBS_MODE_INVALID || state.info.is_finished) {
+        return;
+    }
 
     // Calculate timer reload
     uint16_t timer_reload = 65536 - (GBA_MASTER_CLOCK / state.info.sample_rate);
@@ -1202,6 +1204,25 @@ void gbs_audio_start(void) {
     }
 
     state.info.is_playing = true;
+    state.is_paused = false;
+}
+
+static void start_audio_paused(void) {
+    if (state.info.mode == GBS_MODE_INVALID || state.info.is_finished) {
+        return;
+    }
+
+    gbs_audio_start();
+    gbs_audio_pause();
+}
+
+void gbs_audio_start(void) {
+    if (state.info.mode == GBS_MODE_INVALID || state.info.is_finished) {
+        return;
+    }
+
+    prime_audio_buffers();
+    start_audio_hardware();
 }
 
 void gbs_audio_update(void) {
@@ -1326,7 +1347,7 @@ void gbs_audio_shutdown(void) {
     state.info.mode = GBS_MODE_INVALID;
 }
 
-void gbs_audio_seek_minute(uint32_t minute) {
+static void seek_minute_internal(uint32_t minute, bool leave_paused) {
     if (state.info.mode == GBS_MODE_INVALID) return;
 
     gbs_audio_stop();
@@ -1398,10 +1419,22 @@ void gbs_audio_seek_minute(uint32_t minute) {
         parse_block_header_mono(block, &state.left);
     }
 
-    gbs_audio_start();
+    if (leave_paused) {
+        start_audio_paused();
+    } else {
+        gbs_audio_start();
+    }
     if (state.is_banked) {
         banked_select(saved_bank);
     }
+}
+
+void gbs_audio_seek_minute(uint32_t minute) {
+    seek_minute_internal(minute, false);
+}
+
+void gbs_audio_seek_minute_paused(uint32_t minute) {
+    seek_minute_internal(minute, true);
 }
 
 uint32_t gbs_audio_get_current_minute(void) {
