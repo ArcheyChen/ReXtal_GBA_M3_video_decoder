@@ -1,6 +1,5 @@
 #include "banked_video.h"
 
-#include <gba_interrupt.h>
 #include <string.h>
 
 #define MAPPER_CONFIG1 ((volatile u8*) 0x0E000002)
@@ -22,14 +21,20 @@ static void banked_wait(void) {
     }
 }
 
+static void banked_init_mapper(void) {
+    current_bank = 0;
+    *MAPPER_CONFIG1 = 0;
+    *MAPPER_CONFIG2 = 0x40;
+    banked_wait();
+}
+
 static void banked_select_raw(u32 bank) {
-    bank &= 63u;
+    bank &= 7u;
     if (bank == current_bank) {
         return;
     }
-    *MAPPER_CONFIG1 = (u8) (((bank >> 3) & 7u) << 4);
-    *MAPPER_CONFIG2 = (u8) (0x40u + ((bank & 7u) << 3));
     current_bank = bank;
+    *MAPPER_CONFIG1 = (u8) (bank << 4);
     banked_wait();
 }
 
@@ -38,10 +43,7 @@ u32 banked_current_bank(void) {
 }
 
 void banked_select(u32 bank) {
-    const u16 ime = REG_IME;
-    REG_IME = 0;
     banked_select_raw(bank);
-    REG_IME = ime;
 }
 
 void banked_select_irq(u32 bank) {
@@ -49,21 +51,21 @@ void banked_select_irq(u32 bank) {
 }
 
 const u8* banked_rom_ptr(u32 rom_offset) {
-    banked_select(rom_offset >> 22);
-    return CART_BASE + (rom_offset & M3V_BANK_MASK);
+    banked_select(rom_offset >> 25);
+    return CART_BASE + (rom_offset & M3V_WINDOW_MASK);
 }
 
 const u8* banked_rom_ptr_irq(u32 rom_offset) {
-    banked_select_irq(rom_offset >> 22);
-    return CART_BASE + (rom_offset & M3V_BANK_MASK);
+    banked_select_irq(rom_offset >> 25);
+    return CART_BASE + (rom_offset & M3V_WINDOW_MASK);
 }
 
 void banked_copy(u32 rom_offset, void* dst, u32 size) {
     u8* out = (u8*) dst;
     while (size > 0) {
-        const u32 bank = rom_offset >> 22;
-        const u32 in_bank = rom_offset & M3V_BANK_MASK;
-        u32 chunk = M3V_BANK_SIZE - in_bank;
+        const u32 bank = rom_offset >> 25;
+        const u32 in_bank = rom_offset & M3V_WINDOW_MASK;
+        u32 chunk = M3V_WINDOW_SIZE - in_bank;
         if (chunk > size) {
             chunk = size;
         }
@@ -109,7 +111,7 @@ static bool header_is_valid(const M3VHeader* header) {
 }
 
 bool banked_video_init(void) {
-    banked_select(0);
+    banked_init_mapper();
     const M3VHeader* header = (const M3VHeader*) (CART_BASE + M3V_HEADER_ROM_OFFSET);
     if (!header_is_valid(header)) {
         active = false;

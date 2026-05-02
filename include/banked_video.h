@@ -7,6 +7,8 @@
 #define M3V_HEADER_ROM_OFFSET 0x00100000u
 #define M3V_BANK_SIZE 0x00400000u
 #define M3V_BANK_MASK (M3V_BANK_SIZE - 1u)
+#define M3V_WINDOW_SIZE 0x02000000u
+#define M3V_WINDOW_MASK (M3V_WINDOW_SIZE - 1u)
 
 typedef struct __attribute__((packed)) {
     char magic[4];

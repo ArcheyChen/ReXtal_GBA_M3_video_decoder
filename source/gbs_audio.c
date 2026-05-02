@@ -520,10 +520,7 @@ static void copy_source_block(uint32_t block_index, uint8_t* dst) {
     const uint32_t size = state.info.block_size;
     if (state.is_banked) {
         const uint32_t rom_offset = state.banked_block_offset + block_index * size;
-        const u16 ime = REG_IME;
-        REG_IME = 0;
         const uint8_t* src = banked_rom_ptr_irq(rom_offset);
-        REG_IME = ime;
         memcpy(dst, src, size);
     } else {
         const uint8_t* src = state.gbs_data + GBS_HEADER_SIZE + block_index * size;
@@ -549,15 +546,12 @@ static void cache_fill_blocks(uint32_t max_blocks) {
         uint8_t* dst = cache_slot(fill);
         copy_source_block(fill, dst);
 
-        const u16 ime = REG_IME;
-        REG_IME = 0;
         if (state.cache_fill_block == fill &&
             fill >= state.cache_start_block &&
             fill - state.cache_start_block < GBS_BLOCK_CACHE_BLOCKS) {
             state.cache_fill_block = fill + 1;
             copied++;
         }
-        REG_IME = ime;
     }
 
     if (state.is_banked) {
