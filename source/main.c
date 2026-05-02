@@ -109,34 +109,6 @@ static void show_error(const char* msg) {
     while (1) VBlankIntrWait();
 }
 
-static void show_info(void) {
-    iprintf("\x1b[2J");
-    iprintf("Ausar's M3 Media Player\n");
-    iprintf("================\n\n");
-
-    if (has_video) {
-        if (use_banked_video) {
-            iprintf("Video: Banked (%lu KB)\n",
-                    (unsigned long)(banked_video_total_size() / 1024));
-            iprintf("Frames: %lu\n", (unsigned long)banked_video_frame_count());
-        } else {
-            iprintf("Video: Yes (%lu KB)\n", (unsigned long)(video_size / 1024));
-        }
-    } else {
-        iprintf("Video: Not found\n");
-    }
-
-    if (has_audio) {
-        const GbsAudioInfo* info = gbs_audio_get_info();
-        uint32_t duration = info->total_samples / info->sample_rate;
-        iprintf("Audio: Mode %d, %lu sec\n", info->mode, (unsigned long)duration);
-    } else {
-        iprintf("Audio: Not found\n");
-    }
-
-    iprintf("\nStarting playback...\n");
-}
-
 static void print_centered(const char* text) {
     int len = (int)strlen(text);
     int pad = 0;
@@ -158,6 +130,39 @@ static void print_menu_line(const char* text) {
         iprintf(" ");
     }
     iprintf("%s\n", text);
+}
+
+static void show_info(void) {
+    char line[32];
+
+    iprintf("\x1b[2J");
+    print_centered("ReXtal:Ausar's M3 Decoder");
+    print_separator();
+    iprintf("\n");
+    print_menu_line("Info");
+    iprintf("\n");
+
+    if (has_video) {
+        u32 video_kb = use_banked_video ? (banked_video_total_size() / 1024) : (video_size / 1024);
+        snprintf(line, sizeof(line), "Video : %lu KB", (unsigned long)video_kb);
+        print_menu_line(line);
+        snprintf(line, sizeof(line), "Frames: %lu", (unsigned long)total_frames);
+        print_menu_line(line);
+    } else {
+        print_menu_line("Video : Not found");
+    }
+
+    if (has_audio) {
+        const GbsAudioInfo* info = gbs_audio_get_info();
+        uint32_t duration = info->total_samples / info->sample_rate;
+        snprintf(line, sizeof(line), "Audio : %lu sec", (unsigned long)duration);
+        print_menu_line(line);
+    } else {
+        print_menu_line("Audio : Not found");
+    }
+
+    iprintf("\n\n");
+    print_centered("A/B/SELECT: Return");
 }
 
 static void format_time(u32 frames, char* out) {
@@ -321,13 +326,15 @@ static void show_copyright_notice(void) {
     iprintf("\x1b[2J");
     print_centered("ReXtal:Ausar's M3 Decoder");
     print_separator();
-    iprintf("\n\n");
-    print_centered("Free to use.");
-    print_centered("Commercial use prohibited.");
     iprintf("\n");
-    print_centered("Author: Ausar");
-    print_centered("GitHub: archeychen");
+    print_menu_line("Copyright");
     iprintf("\n\n");
+    print_menu_line("Free to use.");
+    print_menu_line("No commercial use.");
+    iprintf("\n");
+    print_menu_line("Author: Ausar");
+    print_menu_line("GitHub : archeychen");
+    iprintf("\n\n\n");
     print_centered("A/B/SELECT: Return");
 
     wait_for_key_release();
@@ -347,6 +354,19 @@ typedef enum {
     MENU_ACTION_RESTART = 1,
 } MenuAction;
 
+static void wait_for_menu_page_return(void) {
+    wait_for_key_release();
+    while (1) {
+        VBlankIntrWait();
+        scanKeys();
+        u16 keys = keysDown();
+        if (keys & (KEY_A | KEY_B | KEY_SELECT | KEY_START)) {
+            wait_for_key_release();
+            return;
+        }
+    }
+}
+
 static void draw_pause_menu(u32 selected) {
     char elapsed[8];
     char total[8];
@@ -363,8 +383,9 @@ static void draw_pause_menu(u32 selected) {
     iprintf("\n\n");
     print_menu_line(selected == 0 ? "> Resume" : "  Resume");
     print_menu_line(selected == 1 ? "> Restart" : "  Restart");
-    print_menu_line(selected == 2 ? "> Copyright" : "  Copyright");
-    iprintf("\n\n\n");
+    print_menu_line(selected == 2 ? "> Info" : "  Info");
+    print_menu_line(selected == 3 ? "> Copyright" : "  Copyright");
+    iprintf("\n\n");
     print_centered("UP/DOWN: Move");
     print_centered("A: Select  B: Resume");
 }
@@ -383,10 +404,10 @@ static MenuAction show_pause_menu(void) {
         u16 keys = keysDown();
 
         if (keys & KEY_UP) {
-            selected = (selected + 2) % 3;
+            selected = (selected + 3) % 4;
             draw_pause_menu(selected);
         } else if (keys & KEY_DOWN) {
-            selected = (selected + 1) % 3;
+            selected = (selected + 1) % 4;
             draw_pause_menu(selected);
         }
 
@@ -403,7 +424,12 @@ static MenuAction show_pause_menu(void) {
             if (selected == 1) {
                 return MENU_ACTION_RESTART;
             }
-            show_copyright_notice();
+            if (selected == 2) {
+                show_info();
+                wait_for_menu_page_return();
+            } else {
+                show_copyright_notice();
+            }
             draw_pause_menu(selected);
         }
     }
@@ -455,7 +481,6 @@ static void run_pause_menu_audio_only(void) {
         seek_to_minute(0);
     }
     set_pause_state(false);
-    show_info();
 }
 
 // Decode next frame into frame_buffer (does not display)
@@ -652,15 +677,6 @@ int main(void) {
     // Must have at least one media type
     if (!has_video && !has_audio) {
         show_error("No media files found!\nAdd .gbm or .gbs files.");
-    }
-
-    // Show info briefly
-    consoleDemoInit();
-    show_info();
-
-    // Wait a moment to show info
-    for (int i = 0; i < 30; i++) {
-        VBlankIntrWait();
     }
 
     // Start playback
