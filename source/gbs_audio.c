@@ -336,6 +336,21 @@ typedef struct {
     uint32_t reserved2[59]; // Padding to 0x200
 } __attribute__((packed)) GbsHeader;
 
+static uint8_t obfuscated_gbs_header_key(uint32_t index) {
+    uint32_t value = 0x47425352u + index * 0x1f3du;
+    value ^= value >> 13;
+    value *= 0x45d9f3bu;
+    value ^= value >> 16;
+    return (uint8_t)value;
+}
+
+static void decode_obfuscated_gbs_header(GbsHeader* header) {
+    uint8_t* bytes = (uint8_t*)header;
+    for (uint32_t i = 0; i < GBS_HEADER_SIZE; ++i) {
+        bytes[i] ^= obfuscated_gbs_header_key(i);
+    }
+}
+
 // Per-channel decoder state
 typedef struct {
     int32_t predictor;      // Current predictor (unsigned 16-bit range for 2/3-bit)
@@ -1106,6 +1121,9 @@ bool gbs_audio_init_banked(uint32_t header_offset, uint32_t block_offset, uint32
 
     GbsHeader header;
     banked_copy(header_offset, &header, sizeof(header));
+    if (banked_video_is_metadata_obfuscated()) {
+        decode_obfuscated_gbs_header(&header);
+    }
     const bool ok = init_from_header(&header, gbs_size);
     banked_select(saved_bank);
     return ok;

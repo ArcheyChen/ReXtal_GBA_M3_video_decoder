@@ -40,5 +40,6 @@ void gbm_set_version(u8 version);
 // Initialize and decode a frame
 // returns the offset of the next frame, or 0 on error
 u32 gbm_decode_frame(const u8 *data, u32 offset, u16 *dst, const u16 *ref);
+u32 gbm_decode_frame_obfuscated(const u8 *data, u32 offset, u16 *dst, const u16 *ref, u32 frame_index);
 
 #endif // GBM_DECODER_H

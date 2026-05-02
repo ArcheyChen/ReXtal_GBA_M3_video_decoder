@@ -15,6 +15,23 @@ static u32 index_cache_start = 0xffffffffu;
 static u32 index_cache_count;
 static u32 index_cache[INDEX_CACHE_FRAMES];
 
+static u32 obfuscation_mix(u32 value) {
+    value ^= value >> 16;
+    value *= 0x7feb352du;
+    value ^= value >> 15;
+    value *= 0x846ca68bu;
+    value ^= value >> 16;
+    return value;
+}
+
+static u32 index_key(u32 frame_index) {
+    return obfuscation_mix(0x4d335649u ^ frame_index);
+}
+
+static u32 minute_key(u32 minute) {
+    return obfuscation_mix(0x7258744du ^ minute);
+}
+
 static void banked_wait(void) {
     for (volatile int i = 0; i < 64; ++i) {
         __asm__ volatile("nop");
@@ -82,6 +99,9 @@ static bool header_is_valid(const M3VHeader* header) {
         return false;
     }
     if (header->version != 1 || header->header_size != sizeof(M3VHeader)) {
+        return false;
+    }
+    if ((header->flags & ~M3V_FLAG_METADATA_OBFUSCATED) != 0) {
         return false;
     }
     if (header->fps == 0 || header->frame_count == 0) {
@@ -152,6 +172,10 @@ bool banked_video_has_audio(void) {
     return active && active_header.audio_size != 0;
 }
 
+bool banked_video_is_metadata_obfuscated(void) {
+    return active && (active_header.flags & M3V_FLAG_METADATA_OBFUSCATED) != 0;
+}
+
 u32 banked_video_audio_header_offset(void) {
     return active ? active_header.audio_header_offset : 0;
 }
@@ -174,6 +198,11 @@ static bool load_index_cache(u32 frame_index) {
         count = INDEX_CACHE_FRAMES;
     }
     banked_copy(active_header.frame_index_offset + start * 4u, index_cache, count * 4u);
+    if (banked_video_is_metadata_obfuscated()) {
+        for (u32 i = 0; i < count; ++i) {
+            index_cache[i] ^= index_key(start + i);
+        }
+    }
     index_cache_start = start;
     index_cache_count = count;
     return true;
@@ -207,6 +236,9 @@ u32 banked_video_minute_frame(u32 minute) {
     }
     u32 frame = 0;
     banked_copy(active_header.minute_index_offset + minute * 4u, &frame, sizeof(frame));
+    if (banked_video_is_metadata_obfuscated()) {
+        frame ^= minute_key(minute);
+    }
     if (frame >= active_header.frame_count) {
         frame = active_header.frame_count - 1u;
     }

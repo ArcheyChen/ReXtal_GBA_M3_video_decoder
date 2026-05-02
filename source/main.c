@@ -594,9 +594,18 @@ static void decode_next_frame(void) {
         if (frame_ptr) {
             if ((current_frame % FRAMES_PER_MINUTE) == 0) {
                 memset(frame_buffer, 0, sizeof(frame_buffer));
-                gbm_decode_frame(frame_ptr, 0, frame_buffer, NULL);
+                if (banked_video_is_metadata_obfuscated()) {
+                    gbm_decode_frame_obfuscated(frame_ptr, 0, frame_buffer, NULL, current_frame);
+                } else {
+                    gbm_decode_frame(frame_ptr, 0, frame_buffer, NULL);
+                }
             } else {
-                gbm_decode_frame(frame_ptr, 0, frame_buffer, (const u16*)0x06000000);
+                if (banked_video_is_metadata_obfuscated()) {
+                    gbm_decode_frame_obfuscated(frame_ptr, 0, frame_buffer, (const u16*)0x06000000,
+                                                current_frame);
+                } else {
+                    gbm_decode_frame(frame_ptr, 0, frame_buffer, (const u16*)0x06000000);
+                }
             }
         }
         return;

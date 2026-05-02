@@ -64,6 +64,19 @@ static inline u16 read_u16_unaligned(const u8 *ptr) {
     return ptr[0] | (ptr[1] << 8);
 }
 
+static inline u32 obfuscation_mix(u32 value) {
+    value ^= value >> 16;
+    value *= 0x7feb352du;
+    value ^= value >> 15;
+    value *= 0x846ca68bu;
+    value ^= value >> 16;
+    return value;
+}
+
+static inline u16 frame_field_key(u32 frame_index, u32 salt) {
+    return (u16)obfuscation_mix(0x5258544cu ^ salt ^ frame_index);
+}
+
 // Critical Path: next_bit
 // Placing in IWRAM
 static IWRAM_CODE int next_bit(DecodeContext *ctx) {
@@ -772,10 +785,17 @@ static IWRAM_CODE void decode_block_2x1(DecodeContext *ctx) {
 
 // Also put the main decoder loop in IWRAM for good measure?
 // It calls many IWRAM functions, so it's less critical, but looping overhead is reduced.
-u32 IWRAM_CODE gbm_decode_frame(const u8 *data, u32 offset, u16 *dst, const u16 *ref) {
+static u32 IWRAM_CODE gbm_decode_frame_internal(const u8 *data, u32 offset, u16 *dst, const u16 *ref,
+                                                u32 frame_index, int obfuscated) {
     u16 frame_len = read_u16_unaligned(data + offset);
     u16 bit_enc = read_u16_unaligned(data + offset + 2);
     u16 palette_bytes = read_u16_unaligned(data + offset + 4);
+
+    if (obfuscated) {
+        frame_len ^= frame_field_key(frame_index, 0x101u);
+        bit_enc ^= frame_field_key(frame_index, 0x202u);
+        palette_bytes ^= frame_field_key(frame_index, 0x303u);
+    }
 
     u32 next_offset = offset + 2 + frame_len;
 
@@ -811,4 +831,13 @@ u32 IWRAM_CODE gbm_decode_frame(const u8 *data, u32 offset, u16 *dst, const u16 
     }
 
     return next_offset;
+}
+
+u32 IWRAM_CODE gbm_decode_frame(const u8 *data, u32 offset, u16 *dst, const u16 *ref) {
+    return gbm_decode_frame_internal(data, offset, dst, ref, 0, 0);
+}
+
+u32 IWRAM_CODE gbm_decode_frame_obfuscated(const u8 *data, u32 offset, u16 *dst, const u16 *ref,
+                                           u32 frame_index) {
+    return gbm_decode_frame_internal(data, offset, dst, ref, frame_index, 1);
 }
