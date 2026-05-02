@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include "media_source.h"
+#include "banked_video.h"
 #include "gbs_audio.h"
 #include "gbm_decoder.h"
 
@@ -52,11 +53,12 @@ static void copy_frame_to_vram(const void* src, void* dst, u32 size) {
 }
 
 // EWRAM buffer for video frame (240 * 160 = 38400 pixels)
-__attribute__((section(".ewram"))) u16 frame_buffer[38400];
+EWRAM_BSS u16 frame_buffer[38400];
 
 // State
 static bool has_video = false;
 static bool has_audio = false;
+static bool use_banked_video = false;
 static const uint8_t* video_data = NULL;
 static uint32_t video_offset = GBM_HEADER_SIZE;
 static uint32_t video_size = 0;
@@ -75,6 +77,7 @@ static u32 current_frame = 0;
 
 // For tracking current minute (for sync and seeking)
 static u32 current_minute = 0;
+static bool decoded_frame_invalidated = false;
 
 // Pause state
 static bool is_paused = false;
@@ -107,7 +110,13 @@ static void show_info(void) {
     iprintf("================\n\n");
 
     if (has_video) {
-        iprintf("Video: Yes (%lu KB)\n", (unsigned long)(video_size / 1024));
+        if (use_banked_video) {
+            iprintf("Video: Banked (%lu KB)\n",
+                    (unsigned long)(banked_video_total_size() / 1024));
+            iprintf("Frames: %lu\n", (unsigned long)banked_video_frame_count());
+        } else {
+            iprintf("Video: Yes (%lu KB)\n", (unsigned long)(video_size / 1024));
+        }
     } else {
         iprintf("Video: Not found\n");
     }
@@ -145,6 +154,10 @@ static u32 total_minutes = 0;
 
 // Scan video to find I-frame offsets (every 600 frames)
 static void scan_iframe_offsets(void) {
+    if (use_banked_video) {
+        total_minutes = banked_video_minute_count();
+        return;
+    }
     if (!has_video || !video_data) return;
 
     u32 offset = GBM_HEADER_SIZE;
@@ -173,6 +186,15 @@ static void scan_iframe_offsets(void) {
 // I-frame will fully redraw the screen, no need to clear VRAM
 static void video_seek_minute(u32 minute) {
     if (!has_video || minute >= total_minutes) return;
+
+    decoded_frame_invalidated = true;
+
+    if (use_banked_video) {
+        current_frame = banked_video_minute_frame(minute);
+        target_frame = current_frame;
+        current_minute = minute;
+        return;
+    }
 
     video_offset = iframe_offsets[minute];
     current_minute = minute;
@@ -222,7 +244,31 @@ static void toggle_pause(void) {
 
 // Decode next frame into frame_buffer (does not display)
 static void decode_next_frame(void) {
-    if (!has_video || !video_data) return;
+    if (!has_video) return;
+
+    if (use_banked_video) {
+        const u32 frame_count = banked_video_frame_count();
+        if (frame_count == 0) {
+            return;
+        }
+        if (current_frame >= frame_count) {
+            current_frame = 0;
+            target_frame = 0;
+            current_minute = 0;
+        }
+        const u8* frame_ptr = banked_video_frame_ptr(current_frame);
+        if (frame_ptr) {
+            if ((current_frame % FRAMES_PER_MINUTE) == 0) {
+                memset(frame_buffer, 0, sizeof(frame_buffer));
+                gbm_decode_frame(frame_ptr, 0, frame_buffer, NULL);
+            } else {
+                gbm_decode_frame(frame_ptr, 0, frame_buffer, (const u16*)0x06000000);
+            }
+        }
+        return;
+    }
+
+    if (!video_data) return;
 
     // Check for end of video
     if (video_offset + 2 >= video_size) {
@@ -246,12 +292,17 @@ static void decode_next_frame(void) {
     }
 
     // Decode frame (dst = EWRAM buffer, ref = VRAM for delta)
-    video_offset = gbm_decode_frame(video_data, video_offset, frame_buffer, (const u16*)0x06000000);
+    if ((current_frame % FRAMES_PER_MINUTE) == 0) {
+        memset(frame_buffer, 0, sizeof(frame_buffer));
+        video_offset = gbm_decode_frame(video_data, video_offset, frame_buffer, NULL);
+    } else {
+        video_offset = gbm_decode_frame(video_data, video_offset, frame_buffer, (const u16*)0x06000000);
+    }
 }
 
 // Check if audio triggered a sync point (called from main loop)
 static void check_audio_sync(void) {
-    if (!has_audio) return;
+    if (!has_audio || use_banked_video) return;
 
     int32_t sync_minute = gbs_audio_check_minute_sync();
     if (sync_minute >= 0 && (u32)sync_minute < total_minutes) {
@@ -304,12 +355,16 @@ static bool handle_input(void) {
 static void process_video(void) {
     // Decode next frame first (into frame_buffer)
     decode_next_frame();
+    decoded_frame_invalidated = false;
 
     // Wait until it's time to display
     // Also check input during wait so pause can be toggled
     while (current_frame >= target_frame) {
         VBlankIntrWait();
         handle_input();
+        if (decoded_frame_invalidated) {
+            return;
+        }
     }
 
     // Display the pre-decoded frame
@@ -317,11 +372,20 @@ static void process_video(void) {
     current_frame++;
 
     // Update current minute (using subtraction loop instead of division)
-    u32 frame = current_frame;
-    current_minute = 0;
-    while (frame >= FRAMES_PER_MINUTE) {
-        frame -= FRAMES_PER_MINUTE;
-        current_minute++;
+    if (use_banked_video) {
+        u32 minute_count = banked_video_minute_count();
+        u32 minute = current_frame / FRAMES_PER_MINUTE;
+        if (minute_count > 0 && minute >= minute_count) {
+            minute = minute_count - 1;
+        }
+        current_minute = minute;
+    } else {
+        u32 frame = current_frame;
+        current_minute = 0;
+        while (frame >= FRAMES_PER_MINUTE) {
+            frame -= FRAMES_PER_MINUTE;
+            current_minute++;
+        }
     }
 }
 
@@ -331,14 +395,17 @@ int main(void) {
     irqSet(IRQ_VBLANK, vblank_handler);
     irqEnable(IRQ_VBLANK);
 
-    // Initialize media source
-    if (!media_source_init()) {
-        show_error("No GBFS found!\nAppend media with GBFS.");
+    if (banked_video_init()) {
+        has_video = true;
+        use_banked_video = true;
+        gbm_set_version(banked_video_gbm_version());
+    } else if (!media_source_init()) {
+        show_error("No GBFS or M3V found!");
     }
 
-    // Try to load video
+    // Try to load video from GBFS if no banked video was found
     MediaSourceInfo video_info;
-    if (media_source_find_gbm(&video_info)) {
+    if (!use_banked_video && media_source_find_gbm(&video_info)) {
         // Validate GBM header
         if (video_info.size >= GBM_HEADER_SIZE &&
             video_info.data[0] == 'G' && video_info.data[1] == 'B' &&
@@ -354,7 +421,7 @@ int main(void) {
 
     // Try to load audio
     MediaSourceInfo audio_info;
-    if (media_source_find_gbs(&audio_info)) {
+    if (!use_banked_video && media_source_find_gbs(&audio_info)) {
         if (gbs_audio_init(audio_info.data, audio_info.size)) {
             has_audio = true;
         }

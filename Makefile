@@ -20,7 +20,11 @@ include $(DEVKITARM)/gba_rules
 # the makefile is found
 #
 #---------------------------------------------------------------------------------
+ifeq ($(MULTIBANK),1)
+TARGET		:= M3_Movie_Player_mb
+else
 TARGET		:= M3_Movie_Player
+endif
 BUILD		:= build
 SOURCES		:= source gbfs
 INCLUDES	:= include
