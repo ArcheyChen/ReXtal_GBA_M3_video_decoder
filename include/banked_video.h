@@ -22,7 +22,11 @@ typedef struct __attribute__((packed)) {
     u32 video_data_start;
     u32 video_data_end;
     u32 rom_size;
-    u32 reserved[19];
+    u32 audio_header_offset;
+    u32 audio_block_offset;
+    u32 audio_size;
+    u32 audio_data_end;
+    u32 reserved[15];
 } M3VHeader;
 
 bool banked_video_init(void);
@@ -33,11 +37,19 @@ u32 banked_video_minute_count(void);
 u32 banked_video_fps(void);
 u32 banked_video_total_size(void);
 u8 banked_video_gbm_version(void);
+bool banked_video_has_audio(void);
+u32 banked_video_audio_header_offset(void);
+u32 banked_video_audio_block_offset(void);
+u32 banked_video_audio_size(void);
 
 const u8* banked_video_frame_ptr(u32 frame_index);
 u32 banked_video_minute_frame(u32 minute);
 
+u32 banked_current_bank(void);
 void banked_select(u32 bank);
+void banked_select_irq(u32 bank);
+const u8* banked_rom_ptr(u32 rom_offset);
+const u8* banked_rom_ptr_irq(u32 rom_offset);
 void banked_copy(u32 rom_offset, void* dst, u32 size);
 
 #endif

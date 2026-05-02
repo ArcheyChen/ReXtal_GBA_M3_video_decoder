@@ -1,5 +1,6 @@
 #include "banked_video.h"
 
+#include <gba_interrupt.h>
 #include <string.h>
 
 #define MAPPER_CONFIG1 ((volatile u8*) 0x0E000002)
@@ -21,7 +22,7 @@ static void banked_wait(void) {
     }
 }
 
-void banked_select(u32 bank) {
+static void banked_select_raw(u32 bank) {
     bank &= 63u;
     if (bank == current_bank) {
         return;
@@ -30,6 +31,31 @@ void banked_select(u32 bank) {
     *MAPPER_CONFIG2 = (u8) (0x40u + ((bank & 7u) << 3));
     current_bank = bank;
     banked_wait();
+}
+
+u32 banked_current_bank(void) {
+    return current_bank;
+}
+
+void banked_select(u32 bank) {
+    const u16 ime = REG_IME;
+    REG_IME = 0;
+    banked_select_raw(bank);
+    REG_IME = ime;
+}
+
+void banked_select_irq(u32 bank) {
+    banked_select_raw(bank);
+}
+
+const u8* banked_rom_ptr(u32 rom_offset) {
+    banked_select(rom_offset >> 22);
+    return CART_BASE + (rom_offset & M3V_BANK_MASK);
+}
+
+const u8* banked_rom_ptr_irq(u32 rom_offset) {
+    banked_select_irq(rom_offset >> 22);
+    return CART_BASE + (rom_offset & M3V_BANK_MASK);
 }
 
 void banked_copy(u32 rom_offset, void* dst, u32 size) {
@@ -70,6 +96,14 @@ static bool header_is_valid(const M3VHeader* header) {
     }
     if (header->rom_size < header->video_data_end) {
         return false;
+    }
+    if (header->audio_size != 0) {
+        if (header->audio_header_offset < M3V_BANK_SIZE ||
+            header->audio_block_offset < header->audio_header_offset + 0x200u ||
+            header->audio_data_end <= header->audio_block_offset ||
+            header->rom_size < header->audio_data_end) {
+            return false;
+        }
     }
     return true;
 }
@@ -112,6 +146,22 @@ u8 banked_video_gbm_version(void) {
     return active ? (u8) active_header.gbm_version : 0;
 }
 
+bool banked_video_has_audio(void) {
+    return active && active_header.audio_size != 0;
+}
+
+u32 banked_video_audio_header_offset(void) {
+    return active ? active_header.audio_header_offset : 0;
+}
+
+u32 banked_video_audio_block_offset(void) {
+    return active ? active_header.audio_block_offset : 0;
+}
+
+u32 banked_video_audio_size(void) {
+    return active ? active_header.audio_size : 0;
+}
+
 static bool load_index_cache(u32 frame_index) {
     if (!active || frame_index >= active_header.frame_count) {
         return false;
@@ -146,8 +196,7 @@ const u8* banked_video_frame_ptr(u32 frame_index) {
     if (!get_frame_offset(frame_index, &offset)) {
         return 0;
     }
-    banked_select(offset >> 22);
-    return CART_BASE + (offset & M3V_BANK_MASK);
+    return banked_rom_ptr(offset);
 }
 
 u32 banked_video_minute_frame(u32 minute) {

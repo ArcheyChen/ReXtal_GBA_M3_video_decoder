@@ -7,6 +7,8 @@
 
 #include "gbs_audio.h"
 
+#include "banked_video.h"
+
 #include <gba_dma.h>
 #include <gba_interrupt.h>
 #include <gba_sound.h>
@@ -339,6 +341,9 @@ static struct {
     // GBS file info
     const uint8_t* gbs_data;
     uint32_t gbs_size;
+    bool is_banked;
+    uint32_t banked_header_offset;
+    uint32_t banked_block_offset;
     GbsAudioInfo info;
 
     // Decoder state
@@ -347,6 +352,7 @@ static struct {
 
     // Block tracking - current_block_ptr caches gbs_data + header + block_index * block_size
     const uint8_t* current_block_ptr;
+    uint32_t current_block_offset;
     uint32_t block_index;
     uint32_t byte_in_block;
     uint32_t block_header_size;
@@ -456,8 +462,23 @@ static IWRAM_CODE int16_t decode_adpcm_2bit(uint8_t code, ChannelState* ch) {
 // Block Management
 // ============================================================================
 
-static inline const uint8_t* get_current_block(void) {
+static IWRAM_CODE const uint8_t* get_current_block(void) {
+    if (state.is_banked) {
+        return banked_rom_ptr_irq(state.current_block_offset);
+    }
     return state.current_block_ptr;
+}
+
+static IWRAM_CODE void set_current_block(uint32_t block_index) {
+    state.block_index = block_index;
+    state.byte_in_block = 0;
+    if (state.is_banked) {
+        state.current_block_offset =
+            state.banked_block_offset + block_index * state.info.block_size;
+    } else {
+        state.current_block_ptr =
+            state.gbs_data + GBS_HEADER_SIZE + block_index * state.info.block_size;
+    }
 }
 
 static IWRAM_CODE void parse_block_header_mono(const uint8_t* block, ChannelState* ch) {
@@ -496,16 +517,16 @@ static IWRAM_CODE void parse_block_header_stereo(const uint8_t* block) {
 }
 
 static IWRAM_CODE void advance_to_next_block(void) {
-    state.block_index++;
-    state.byte_in_block = 0;
-    state.current_block_ptr += state.info.block_size;  // Just add block_size instead of multiply
-
-    if (state.block_index >= state.info.total_blocks) {
+    const uint32_t next_block = state.block_index + 1;
+    if (next_block >= state.info.total_blocks) {
+        state.block_index = next_block;
+        state.byte_in_block = 0;
         state.info.is_finished = true;
         return;
     }
 
-    const uint8_t* block = state.current_block_ptr;
+    set_current_block(next_block);
+    const uint8_t* block = get_current_block();
 
     if (state.info.channels == 2) {
         parse_block_header_stereo(block);
@@ -520,7 +541,7 @@ static IWRAM_CODE void advance_to_next_block(void) {
 
 // Mode 0: Stereo 4-bit IMA ADPCM
 static IWRAM_CODE void decode_buffer_stereo_4bit(int8_t* left, int8_t* right, uint32_t count) {
-    const uint8_t* data = state.current_block_ptr + state.block_header_size;
+    const uint8_t* data = get_current_block() + state.block_header_size;
     uint32_t data_per_block = state.info.block_size - state.block_header_size;
     uint32_t byte_pos = state.byte_in_block;
     uint32_t decoded = 0;
@@ -540,7 +561,7 @@ static IWRAM_CODE void decode_buffer_stereo_4bit(int8_t* left, int8_t* right, ui
         if (byte_pos >= data_per_block) {
             state.byte_in_block = byte_pos;
             advance_to_next_block();
-            data = state.current_block_ptr + state.block_header_size;
+            data = get_current_block() + state.block_header_size;
             byte_pos = 0;
         }
     }
@@ -558,7 +579,7 @@ static IWRAM_CODE void decode_buffer_stereo_4bit(int8_t* left, int8_t* right, ui
 
 // Mode 1: Mono 3-bit ADPCM (8 samples per 3 bytes)
 static IWRAM_CODE void decode_buffer_mono_3bit(int8_t* dest, uint32_t count) {
-    const uint8_t* data = state.current_block_ptr + state.block_header_size;
+    const uint8_t* data = get_current_block() + state.block_header_size;
     uint32_t data_per_block = state.info.block_size - state.block_header_size;
     uint32_t byte_pos = state.byte_in_block;
     uint32_t decoded = 0;
@@ -575,7 +596,7 @@ static IWRAM_CODE void decode_buffer_mono_3bit(int8_t* dest, uint32_t count) {
             state.byte_in_block = byte_pos;
             advance_to_next_block();
             if (state.info.is_finished) break;
-            data = state.current_block_ptr + state.block_header_size;
+            data = get_current_block() + state.block_header_size;
             byte_pos = 0;
         }
 
@@ -608,7 +629,7 @@ static IWRAM_CODE void decode_buffer_mono_3bit(int8_t* dest, uint32_t count) {
             state.byte_in_block = byte_pos;
             advance_to_next_block();
             if (!state.info.is_finished) {
-                data = state.current_block_ptr + state.block_header_size;
+                data = get_current_block() + state.block_header_size;
                 byte_pos = 0;
             }
         }
@@ -649,7 +670,7 @@ static IWRAM_CODE void decode_buffer_mono_3bit(int8_t* dest, uint32_t count) {
 
 // Mode 2: Mono 4-bit IMA ADPCM
 static IWRAM_CODE void decode_buffer_mono_4bit(int8_t* dest, uint32_t count) {
-    const uint8_t* data = state.current_block_ptr + state.block_header_size;
+    const uint8_t* data = get_current_block() + state.block_header_size;
     uint32_t data_per_block = state.info.block_size - state.block_header_size;
     uint32_t byte_pos = state.byte_in_block;
     uint32_t decoded = 0;
@@ -666,7 +687,7 @@ static IWRAM_CODE void decode_buffer_mono_4bit(int8_t* dest, uint32_t count) {
             state.byte_in_block = byte_pos;
             advance_to_next_block();
             if (state.info.is_finished) break;
-            data = state.current_block_ptr + state.block_header_size;
+            data = get_current_block() + state.block_header_size;
             byte_pos = 0;
         }
 
@@ -681,7 +702,7 @@ static IWRAM_CODE void decode_buffer_mono_4bit(int8_t* dest, uint32_t count) {
             state.byte_in_block = byte_pos;
             advance_to_next_block();
             if (!state.info.is_finished) {
-                data = state.current_block_ptr + state.block_header_size;
+                data = get_current_block() + state.block_header_size;
                 byte_pos = 0;
             }
         }
@@ -701,7 +722,7 @@ static IWRAM_CODE void decode_buffer_mono_4bit(int8_t* dest, uint32_t count) {
 
 // Mode 3/4: Mono 2-bit ADPCM (4 samples per byte)
 static IWRAM_CODE void decode_buffer_mono_2bit(int8_t* dest, uint32_t count) {
-    const uint8_t* data = state.current_block_ptr + state.block_header_size;
+    const uint8_t* data = get_current_block() + state.block_header_size;
     uint32_t data_per_block = state.info.block_size - state.block_header_size;
     uint32_t byte_pos = state.byte_in_block;
     uint32_t decoded = 0;
@@ -718,7 +739,7 @@ static IWRAM_CODE void decode_buffer_mono_2bit(int8_t* dest, uint32_t count) {
             state.byte_in_block = byte_pos;
             advance_to_next_block();
             if (state.info.is_finished) break;
-            data = state.current_block_ptr + state.block_header_size;
+            data = get_current_block() + state.block_header_size;
             byte_pos = 0;
         }
 
@@ -738,7 +759,7 @@ static IWRAM_CODE void decode_buffer_mono_2bit(int8_t* dest, uint32_t count) {
             state.byte_in_block = byte_pos;
             advance_to_next_block();
             if (!state.info.is_finished) {
-                data = state.current_block_ptr + state.block_header_size;
+                data = get_current_block() + state.block_header_size;
                 byte_pos = 0;
             }
         }
@@ -789,6 +810,14 @@ static IWRAM_CODE void decode_buffer(int8_t* left, int8_t* right, uint32_t count
     }
 }
 
+static IWRAM_CODE void decode_buffer_preserve_bank(int8_t* left, int8_t* right, uint32_t count) {
+    const u32 saved_bank = banked_current_bank();
+    decode_buffer(left, right, count);
+    if (state.is_banked) {
+        banked_select_irq(saved_bank);
+    }
+}
+
 // ============================================================================
 // Interrupt Handler
 // ============================================================================
@@ -822,9 +851,9 @@ static IWRAM_CODE void audio_timer1_handler(void) {
     }
 
     // Decode into buffer that just finished playing
-    decode_buffer(audio_buffer_left[play_buffer],
-                  state.info.channels == 2 ? audio_buffer_right[play_buffer] : NULL,
-                  AUDIO_BUFFER_SAMPLES);
+    decode_buffer_preserve_bank(audio_buffer_left[play_buffer],
+                                state.info.channels == 2 ? audio_buffer_right[play_buffer] : NULL,
+                                AUDIO_BUFFER_SAMPLES);
 
     // Check if we crossed a minute boundary (using comparison instead of division)
     if (state.info.samples_decoded >= state.next_minute_sample) {
@@ -836,24 +865,10 @@ static IWRAM_CODE void audio_timer1_handler(void) {
     }
 }
 
-// ============================================================================
-// Public API
-// ============================================================================
-
-bool gbs_audio_init(const uint8_t* gbs_data, uint32_t gbs_size) {
-    // Clear state
-    memset(&state, 0, sizeof(state));
-
-    state.gbs_data = gbs_data;
-    state.gbs_size = gbs_size;
-    state.info.mode = GBS_MODE_INVALID;
-
-    // Validate header
+static bool init_from_header(const GbsHeader* header, uint32_t gbs_size) {
     if (gbs_size < GBS_HEADER_SIZE) {
         return false;
     }
-
-    const GbsHeader* header = (const GbsHeader*)gbs_data;
 
     if (memcmp(header->magic, "GBAL", 4) != 0 ||
         memcmp(header->marker, "MUSI", 4) != 0) {
@@ -930,15 +945,15 @@ bool gbs_audio_init(const uint8_t* gbs_data, uint32_t gbs_size) {
 
     state.info.total_samples = state.info.total_blocks * samples_per_block;
 
-    // Initialize first block pointer
-    state.current_block_ptr = gbs_data + GBS_HEADER_SIZE;
+    set_current_block(0);
 
     // Initialize first block
     if (state.info.total_blocks > 0) {
+        const uint8_t* block = get_current_block();
         if (state.info.channels == 2) {
-            parse_block_header_stereo(state.current_block_ptr);
+            parse_block_header_stereo(block);
         } else {
-            parse_block_header_mono(state.current_block_ptr, &state.left);
+            parse_block_header_mono(block, &state.left);
         }
     }
 
@@ -954,18 +969,53 @@ bool gbs_audio_init(const uint8_t* gbs_data, uint32_t gbs_size) {
     return true;
 }
 
+// ============================================================================
+// Public API
+// ============================================================================
+
+bool gbs_audio_init(const uint8_t* gbs_data, uint32_t gbs_size) {
+    memset(&state, 0, sizeof(state));
+
+    state.gbs_data = gbs_data;
+    state.gbs_size = gbs_size;
+    state.info.mode = GBS_MODE_INVALID;
+
+    if (gbs_size < GBS_HEADER_SIZE) {
+        return false;
+    }
+
+    return init_from_header((const GbsHeader*)gbs_data, gbs_size);
+}
+
+bool gbs_audio_init_banked(uint32_t header_offset, uint32_t block_offset, uint32_t gbs_size) {
+    const u32 saved_bank = banked_current_bank();
+    memset(&state, 0, sizeof(state));
+
+    state.is_banked = true;
+    state.gbs_size = gbs_size;
+    state.banked_header_offset = header_offset;
+    state.banked_block_offset = block_offset;
+    state.info.mode = GBS_MODE_INVALID;
+
+    GbsHeader header;
+    banked_copy(header_offset, &header, sizeof(header));
+    const bool ok = init_from_header(&header, gbs_size);
+    banked_select(saved_bank);
+    return ok;
+}
+
 void gbs_audio_start(void) {
     if (state.info.mode == GBS_MODE_INVALID || state.info.is_finished) {
         return;
     }
 
     // Pre-decode both buffers
-    decode_buffer(audio_buffer_left[0],
-                  state.info.channels == 2 ? audio_buffer_right[0] : NULL,
-                  AUDIO_BUFFER_SAMPLES);
-    decode_buffer(audio_buffer_left[1],
-                  state.info.channels == 2 ? audio_buffer_right[1] : NULL,
-                  AUDIO_BUFFER_SAMPLES);
+    decode_buffer_preserve_bank(audio_buffer_left[0],
+                                state.info.channels == 2 ? audio_buffer_right[0] : NULL,
+                                AUDIO_BUFFER_SAMPLES);
+    decode_buffer_preserve_bank(audio_buffer_left[1],
+                                state.info.channels == 2 ? audio_buffer_right[1] : NULL,
+                                AUDIO_BUFFER_SAMPLES);
 
     state.active_buffer = 0;
 
@@ -1092,24 +1142,29 @@ bool gbs_audio_is_paused(void) {
 
 void gbs_audio_restart(void) {
     gbs_audio_stop();
+    const u32 saved_bank = banked_current_bank();
 
     // Reset decoder state
     state.block_index = 0;
     state.byte_in_block = 0;
     state.info.samples_decoded = 0;
     state.info.is_finished = false;
-    state.current_block_ptr = state.gbs_data + GBS_HEADER_SIZE;
+    set_current_block(0);
 
     // Re-parse first block header
     if (state.info.total_blocks > 0) {
+        const uint8_t* block = get_current_block();
         if (state.info.channels == 2) {
-            parse_block_header_stereo(state.current_block_ptr);
+            parse_block_header_stereo(block);
         } else {
-            parse_block_header_mono(state.current_block_ptr, &state.left);
+            parse_block_header_mono(block, &state.left);
         }
     }
 
     gbs_audio_start();
+    if (state.is_banked) {
+        banked_select(saved_bank);
+    }
 }
 
 bool gbs_audio_is_playing(void) {
@@ -1139,6 +1194,7 @@ void gbs_audio_seek_minute(uint32_t minute) {
     if (state.info.mode == GBS_MODE_INVALID) return;
 
     gbs_audio_stop();
+    const u32 saved_bank = banked_current_bank();
 
     // Calculate target block based on minute
     // samples_per_minute = sample_rate * 60
@@ -1180,13 +1236,11 @@ void gbs_audio_seek_minute(uint32_t minute) {
     }
 
     // Reset decoder state to target block
-    state.block_index = target_block;
-    state.byte_in_block = 0;
+    set_current_block(target_block);
     state.info.samples_decoded = target_block * samples_per_block;
     state.info.is_finished = false;
     state.samples_buffered = 0;
     state.have_high_nibble = false;
-    state.current_block_ptr = state.gbs_data + GBS_HEADER_SIZE + target_block * state.info.block_size;
 
     // Reset sync tracking for new position
     // next_minute_sample = (minute + 1) * samples_per_minute
@@ -1199,13 +1253,17 @@ void gbs_audio_seek_minute(uint32_t minute) {
     state.sync_minute = -1;  // Clear any pending sync
 
     // Parse block header
+    const uint8_t* block = get_current_block();
     if (state.info.channels == 2) {
-        parse_block_header_stereo(state.current_block_ptr);
+        parse_block_header_stereo(block);
     } else {
-        parse_block_header_mono(state.current_block_ptr, &state.left);
+        parse_block_header_mono(block, &state.left);
     }
 
     gbs_audio_start();
+    if (state.is_banked) {
+        banked_select(saved_bank);
+    }
 }
 
 uint32_t gbs_audio_get_current_minute(void) {

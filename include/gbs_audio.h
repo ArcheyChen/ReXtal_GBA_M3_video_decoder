@@ -45,6 +45,16 @@ typedef struct {
 bool gbs_audio_init(const uint8_t* gbs_data, uint32_t gbs_size);
 
 /*
+ * Initialize GBS audio from a multibank ROM layout.
+ *
+ * @param header_offset  Absolute ROM offset of the original 0x200-byte GBS header
+ * @param block_offset   Absolute ROM offset of the first compressed GBS block
+ * @param gbs_size       Original GBS file size, including the 0x200-byte header
+ * @return               true if initialization successful
+ */
+bool gbs_audio_init_banked(uint32_t header_offset, uint32_t block_offset, uint32_t gbs_size);
+
+/*
  * Start audio playback.
  * Call this after gbs_audio_init().
  */

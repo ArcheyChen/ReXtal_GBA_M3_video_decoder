@@ -302,7 +302,7 @@ static void decode_next_frame(void) {
 
 // Check if audio triggered a sync point (called from main loop)
 static void check_audio_sync(void) {
-    if (!has_audio || use_banked_video) return;
+    if (!has_audio) return;
 
     int32_t sync_minute = gbs_audio_check_minute_sync();
     if (sync_minute >= 0 && (u32)sync_minute < total_minutes) {
@@ -421,7 +421,13 @@ int main(void) {
 
     // Try to load audio
     MediaSourceInfo audio_info;
-    if (!use_banked_video && media_source_find_gbs(&audio_info)) {
+    if (use_banked_video && banked_video_has_audio()) {
+        if (gbs_audio_init_banked(banked_video_audio_header_offset(),
+                                  banked_video_audio_block_offset(),
+                                  banked_video_audio_size())) {
+            has_audio = true;
+        }
+    } else if (!use_banked_video && media_source_find_gbs(&audio_info)) {
         if (gbs_audio_init(audio_info.data, audio_info.size)) {
             has_audio = true;
         }

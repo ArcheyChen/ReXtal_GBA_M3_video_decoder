@@ -2,7 +2,7 @@
  * Multibank video packager.
  *
  * Usage:
- *   mb_video_packager output.gba M3_Movie_Player_mb.gba movie.gbm [rom_mb]
+ *   mb_video_packager output.gba M3_Movie_Player_mb.gba movie.gbm [movie.gbs] [rom_mb]
  */
 
 #include <stdint.h>
@@ -16,6 +16,7 @@
 #define M3V_DEFAULT_ROM_MB 256u
 #define M3V_DATA_START M3V_BANK_SIZE
 #define GBM_HEADER_SIZE 0x200u
+#define GBS_HEADER_SIZE 0x200u
 #define FRAMES_PER_MINUTE 600u
 
 typedef struct {
@@ -32,7 +33,11 @@ typedef struct {
     uint32_t video_data_start;
     uint32_t video_data_end;
     uint32_t rom_size;
-    uint32_t reserved[19];
+    uint32_t audio_header_offset;
+    uint32_t audio_block_offset;
+    uint32_t audio_size;
+    uint32_t audio_data_end;
+    uint32_t reserved[15];
 } __attribute__((packed)) M3VHeader;
 
 static uint32_t align4(uint32_t value) {
@@ -70,6 +75,37 @@ static uint16_t read_le16(const uint8_t* data) {
     return (uint16_t) (data[0] | (data[1] << 8));
 }
 
+static uint32_t read_le32(const uint8_t* data) {
+    return (uint32_t) data[0] |
+           ((uint32_t) data[1] << 8) |
+           ((uint32_t) data[2] << 16) |
+           ((uint32_t) data[3] << 24);
+}
+
+static uint32_t align_to(uint32_t value, uint32_t alignment) {
+    return (value + alignment - 1u) & ~(alignment - 1u);
+}
+
+static uint32_t gbs_block_size(const uint8_t* gbs, uint32_t gbs_size) {
+    if (gbs_size < GBS_HEADER_SIZE || memcmp(gbs, "GBAL", 4) != 0 ||
+        memcmp(gbs + 8, "MUSI", 4) != 0) {
+        return 0;
+    }
+    const uint32_t mode = read_le32(gbs + 0x10);
+    switch (mode) {
+        case 0:
+        case 1:
+            return 0x400u;
+        case 2:
+        case 3:
+            return 0x200u;
+        case 4:
+            return 0x100u;
+        default:
+            return 0;
+    }
+}
+
 static int append_u32(uint32_t** data, uint32_t* count, uint32_t* capacity, uint32_t value) {
     if (*count >= *capacity) {
         uint32_t new_capacity = *capacity ? *capacity * 2u : 1024u;
@@ -85,11 +121,11 @@ static int append_u32(uint32_t** data, uint32_t* count, uint32_t* capacity, uint
 }
 
 static void print_usage(const char* prog) {
-    fprintf(stderr, "Usage: %s output.gba M3_Movie_Player_mb.gba movie.gbm [rom_mb]\n", prog);
+    fprintf(stderr, "Usage: %s output.gba M3_Movie_Player_mb.gba movie.gbm [movie.gbs] [rom_mb]\n", prog);
 }
 
 int main(int argc, char** argv) {
-    if (argc != 4 && argc != 5) {
+    if (argc < 4 || argc > 6) {
         print_usage(argv[0]);
         return 1;
     }
@@ -97,9 +133,19 @@ int main(int argc, char** argv) {
     const char* out_path = argv[1];
     const char* player_path = argv[2];
     const char* gbm_path = argv[3];
+    const char* gbs_path = NULL;
     uint32_t rom_mb = M3V_DEFAULT_ROM_MB;
     if (argc == 5) {
-        rom_mb = (uint32_t) strtoul(argv[4], NULL, 0);
+        char* end = NULL;
+        const uint32_t value = (uint32_t) strtoul(argv[4], &end, 0);
+        if (end && *end == '\0') {
+            rom_mb = value;
+        } else {
+            gbs_path = argv[4];
+        }
+    } else if (argc == 6) {
+        gbs_path = argv[4];
+        rom_mb = (uint32_t) strtoul(argv[5], NULL, 0);
     }
     if (rom_mb < 8 || rom_mb > 256 || (rom_mb % 4) != 0) {
         fprintf(stderr, "Error: rom_mb must be 8..256 and divisible by 4\n");
@@ -133,11 +179,33 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    uint32_t gbs_size = 0;
+    uint8_t* gbs = NULL;
+    uint32_t audio_block_size = 0;
+    if (gbs_path) {
+        gbs = read_file(gbs_path, &gbs_size);
+        if (!gbs) {
+            fprintf(stderr, "Error: failed to read GBS: %s\n", gbs_path);
+            free(player);
+            free(gbm);
+            return 1;
+        }
+        audio_block_size = gbs_block_size(gbs, gbs_size);
+        if (audio_block_size == 0) {
+            fprintf(stderr, "Error: invalid GBS file\n");
+            free(player);
+            free(gbm);
+            free(gbs);
+            return 1;
+        }
+    }
+
     uint8_t* rom = malloc(rom_size);
     if (!rom) {
         fprintf(stderr, "Error: failed to allocate ROM image\n");
         free(player);
         free(gbm);
+        free(gbs);
         return 1;
     }
     memset(rom, 0xFF, rom_size);
@@ -217,10 +285,62 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Error: no frames found in GBM\n");
         free(player);
         free(gbm);
+        free(gbs);
         free(rom);
         free(frame_offsets);
         free(minute_frames);
         return 1;
+    }
+
+    const uint32_t video_data_end = rom_offset;
+    uint32_t audio_header_offset = 0;
+    uint32_t audio_block_offset = 0;
+    uint32_t audio_data_end = 0;
+    if (gbs) {
+        rom_offset = align4(rom_offset);
+        if ((rom_offset & M3V_BANK_MASK) + GBS_HEADER_SIZE > M3V_BANK_SIZE) {
+            rom_offset = (rom_offset + M3V_BANK_MASK) & ~M3V_BANK_MASK;
+        }
+        audio_header_offset = rom_offset;
+        if (audio_header_offset + GBS_HEADER_SIZE > rom_size) {
+            fprintf(stderr, "Error: ROM full before GBS header\n");
+            free(player);
+            free(gbm);
+            free(gbs);
+            free(rom);
+            free(frame_offsets);
+            free(minute_frames);
+            return 1;
+        }
+        memcpy(rom + audio_header_offset, gbs, GBS_HEADER_SIZE);
+
+        audio_block_offset = align_to(audio_header_offset + GBS_HEADER_SIZE, audio_block_size);
+        if ((audio_block_offset & M3V_BANK_MASK) + audio_block_size > M3V_BANK_SIZE) {
+            audio_block_offset = (audio_block_offset + M3V_BANK_MASK) & ~M3V_BANK_MASK;
+        }
+
+        uint32_t src = GBS_HEADER_SIZE;
+        uint32_t dst = audio_block_offset;
+        while (src + audio_block_size <= gbs_size) {
+            if ((dst & M3V_BANK_MASK) + audio_block_size > M3V_BANK_SIZE) {
+                dst = (dst + M3V_BANK_MASK) & ~M3V_BANK_MASK;
+            }
+            if (dst + audio_block_size > rom_size) {
+                fprintf(stderr, "Error: ROM full while writing GBS data\n");
+                free(player);
+                free(gbm);
+                free(gbs);
+                free(rom);
+                free(frame_offsets);
+                free(minute_frames);
+                return 1;
+            }
+            memcpy(rom + dst, gbs + src, audio_block_size);
+            src += audio_block_size;
+            dst += audio_block_size;
+        }
+        audio_data_end = dst;
+        rom_offset = dst;
     }
 
     const uint32_t header_offset = M3V_HEADER_ROM_OFFSET;
@@ -250,8 +370,12 @@ int main(int argc, char** argv) {
     header.frame_index_offset = frame_index_offset;
     header.minute_index_offset = minute_index_offset;
     header.video_data_start = M3V_DATA_START;
-    header.video_data_end = rom_offset;
+    header.video_data_end = video_data_end;
     header.rom_size = rom_size;
+    header.audio_header_offset = audio_header_offset;
+    header.audio_block_offset = audio_block_offset;
+    header.audio_size = gbs_size;
+    header.audio_data_end = audio_data_end;
 
     memcpy(rom + header_offset, &header, sizeof(header));
     memcpy(rom + frame_index_offset, frame_offsets, frame_count * 4u);
@@ -271,11 +395,12 @@ int main(int argc, char** argv) {
     fclose(out);
 
     printf("Created: %s\n", out_path);
-    printf("  rom=%u MiB frames=%u minutes=%u used=%u bytes\n",
-           rom_mb, frame_count, minute_count, rom_offset);
+    printf("  rom=%u MiB frames=%u minutes=%u audio=%s used=%u bytes\n",
+           rom_mb, frame_count, minute_count, gbs ? "yes" : "no", rom_offset);
 
     free(player);
     free(gbm);
+    free(gbs);
     free(rom);
     free(frame_offsets);
     free(minute_frames);
