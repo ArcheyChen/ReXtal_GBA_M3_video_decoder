@@ -55,6 +55,12 @@
 #define AUDIO_BUFFER_SAMPLES    1024
 #define AUDIO_BUFFER_COUNT      2
 
+// Compressed GBS block cache.
+// The main loop fills this ring from ROM; the audio IRQ decodes from RAM.
+#define GBS_BLOCK_CACHE_BLOCKS      16
+#define GBS_BLOCK_CACHE_MAX_SIZE    0x400
+#define GBS_BLOCK_CACHE_UPDATE_MAX  4
+
 // ============================================================================
 // ADPCM Tables
 // ============================================================================
@@ -357,6 +363,12 @@ static struct {
     uint32_t byte_in_block;
     uint32_t block_header_size;
 
+    // Compressed block ring buffer. Valid range is [cache_start_block, cache_fill_block).
+    bool cache_enabled;
+    volatile uint32_t cache_start_block;
+    volatile uint32_t cache_fill_block;
+    volatile uint32_t cache_underflows;
+
     // Buffered samples for multi-sample decoders
     // Mode 1 (3-bit): 8 samples per 3 bytes
     int16_t buffered_samples[8];
@@ -384,6 +396,7 @@ static struct {
 // For stereo: left channel in buffer_left, right in buffer_right
 IWRAM_DATA static int8_t audio_buffer_left[AUDIO_BUFFER_COUNT][AUDIO_BUFFER_SAMPLES] __attribute__((aligned(4)));
 IWRAM_DATA static int8_t audio_buffer_right[AUDIO_BUFFER_COUNT][AUDIO_BUFFER_SAMPLES] __attribute__((aligned(4)));
+EWRAM_BSS static uint8_t gbs_block_cache[GBS_BLOCK_CACHE_BLOCKS][GBS_BLOCK_CACHE_MAX_SIZE] __attribute__((aligned(4)));
 
 // ============================================================================
 // ADPCM Decoding Functions
@@ -462,7 +475,102 @@ static IWRAM_CODE int16_t decode_adpcm_2bit(uint8_t code, ChannelState* ch) {
 // Block Management
 // ============================================================================
 
+static IWRAM_CODE uint8_t* cache_slot(uint32_t block_index) {
+    return gbs_block_cache[block_index & (GBS_BLOCK_CACHE_BLOCKS - 1)];
+}
+
+static IWRAM_CODE const uint8_t* cache_lookup(uint32_t block_index) {
+    if (!state.cache_enabled) {
+        return NULL;
+    }
+
+    const uint32_t start = state.cache_start_block;
+    const uint32_t fill = state.cache_fill_block;
+    if (block_index < start || block_index >= fill) {
+        state.cache_underflows++;
+        return NULL;
+    }
+    if (block_index - start >= GBS_BLOCK_CACHE_BLOCKS) {
+        state.cache_underflows++;
+        return NULL;
+    }
+    return cache_slot(block_index);
+}
+
+static IWRAM_CODE void cache_retire_to(uint32_t block_index) {
+    if (!state.cache_enabled) {
+        return;
+    }
+
+    if (block_index > state.cache_start_block) {
+        state.cache_start_block = block_index;
+    }
+    if (state.cache_fill_block < state.cache_start_block) {
+        state.cache_fill_block = state.cache_start_block;
+    }
+}
+
+static void cache_reset(uint32_t block_index) {
+    state.cache_start_block = block_index;
+    state.cache_fill_block = block_index;
+    state.cache_underflows = 0;
+}
+
+static void copy_source_block(uint32_t block_index, uint8_t* dst) {
+    const uint32_t size = state.info.block_size;
+    if (state.is_banked) {
+        const uint32_t rom_offset = state.banked_block_offset + block_index * size;
+        const u16 ime = REG_IME;
+        REG_IME = 0;
+        const uint8_t* src = banked_rom_ptr_irq(rom_offset);
+        REG_IME = ime;
+        memcpy(dst, src, size);
+    } else {
+        const uint8_t* src = state.gbs_data + GBS_HEADER_SIZE + block_index * size;
+        memcpy(dst, src, size);
+    }
+}
+
+static void cache_fill_blocks(uint32_t max_blocks) {
+    if (!state.cache_enabled || state.info.total_blocks == 0) {
+        return;
+    }
+
+    const u32 saved_bank = banked_current_bank();
+    uint32_t copied = 0;
+
+    while (copied < max_blocks) {
+        const uint32_t start = state.cache_start_block;
+        const uint32_t fill = state.cache_fill_block;
+        if (fill >= state.info.total_blocks || fill - start >= GBS_BLOCK_CACHE_BLOCKS) {
+            break;
+        }
+
+        uint8_t* dst = cache_slot(fill);
+        copy_source_block(fill, dst);
+
+        const u16 ime = REG_IME;
+        REG_IME = 0;
+        if (state.cache_fill_block == fill &&
+            fill >= state.cache_start_block &&
+            fill - state.cache_start_block < GBS_BLOCK_CACHE_BLOCKS) {
+            state.cache_fill_block = fill + 1;
+            copied++;
+        }
+        REG_IME = ime;
+    }
+
+    if (state.is_banked) {
+        banked_select(saved_bank);
+    }
+}
+
 static IWRAM_CODE const uint8_t* get_current_block(void) {
+    const uint8_t* cached = cache_lookup(state.block_index);
+    if (cached) {
+        return cached;
+    }
+
     if (state.is_banked) {
         return banked_rom_ptr_irq(state.current_block_offset);
     }
@@ -472,6 +580,7 @@ static IWRAM_CODE const uint8_t* get_current_block(void) {
 static IWRAM_CODE void set_current_block(uint32_t block_index) {
     state.block_index = block_index;
     state.byte_in_block = 0;
+    cache_retire_to(block_index);
     if (state.is_banked) {
         state.current_block_offset =
             state.banked_block_offset + block_index * state.info.block_size;
@@ -945,6 +1054,10 @@ static bool init_from_header(const GbsHeader* header, uint32_t gbs_size) {
 
     state.info.total_samples = state.info.total_blocks * samples_per_block;
 
+    state.cache_enabled = (state.info.total_blocks > 0);
+    cache_reset(0);
+    cache_fill_blocks(GBS_BLOCK_CACHE_BLOCKS);
+
     set_current_block(0);
 
     // Initialize first block
@@ -1009,6 +1122,8 @@ void gbs_audio_start(void) {
         return;
     }
 
+    cache_fill_blocks(GBS_BLOCK_CACHE_BLOCKS);
+
     // Pre-decode both buffers
     decode_buffer_preserve_bank(audio_buffer_left[0],
                                 state.info.channels == 2 ? audio_buffer_right[0] : NULL,
@@ -1016,6 +1131,7 @@ void gbs_audio_start(void) {
     decode_buffer_preserve_bank(audio_buffer_left[1],
                                 state.info.channels == 2 ? audio_buffer_right[1] : NULL,
                                 AUDIO_BUFFER_SAMPLES);
+    cache_fill_blocks(GBS_BLOCK_CACHE_BLOCKS);
 
     state.active_buffer = 0;
 
@@ -1072,6 +1188,10 @@ void gbs_audio_start(void) {
     }
 
     state.info.is_playing = true;
+}
+
+void gbs_audio_update(void) {
+    cache_fill_blocks(GBS_BLOCK_CACHE_UPDATE_MAX);
 }
 
 void gbs_audio_stop(void) {
@@ -1149,6 +1269,8 @@ void gbs_audio_restart(void) {
     state.byte_in_block = 0;
     state.info.samples_decoded = 0;
     state.info.is_finished = false;
+    cache_reset(0);
+    cache_fill_blocks(GBS_BLOCK_CACHE_BLOCKS);
     set_current_block(0);
 
     // Re-parse first block header
@@ -1236,6 +1358,8 @@ void gbs_audio_seek_minute(uint32_t minute) {
     }
 
     // Reset decoder state to target block
+    cache_reset(target_block);
+    cache_fill_blocks(GBS_BLOCK_CACHE_BLOCKS);
     set_current_block(target_block);
     state.info.samples_decoded = target_block * samples_per_block;
     state.info.is_finished = false;

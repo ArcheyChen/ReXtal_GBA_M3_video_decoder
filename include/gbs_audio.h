@@ -61,6 +61,12 @@ bool gbs_audio_init_banked(uint32_t header_offset, uint32_t block_offset, uint32
 void gbs_audio_start(void);
 
 /*
+ * Refill the compressed-audio block cache.
+ * Call this regularly from the main loop while audio is playing.
+ */
+void gbs_audio_update(void);
+
+/*
  * Stop audio playback.
  */
 void gbs_audio_stop(void);

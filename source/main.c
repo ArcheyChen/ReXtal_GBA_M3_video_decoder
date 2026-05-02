@@ -353,14 +353,25 @@ static bool handle_input(void) {
 // Process video frames with frame rate control
 // Flow: decode -> wait for timing -> display -> repeat
 static void process_video(void) {
+    if (has_audio) {
+        gbs_audio_update();
+    }
+
     // Decode next frame first (into frame_buffer)
     decode_next_frame();
     decoded_frame_invalidated = false;
+
+    if (has_audio) {
+        gbs_audio_update();
+    }
 
     // Wait until it's time to display
     // Also check input during wait so pause can be toggled
     while (current_frame >= target_frame) {
         VBlankIntrWait();
+        if (has_audio) {
+            gbs_audio_update();
+        }
         handle_input();
         if (decoded_frame_invalidated) {
             return;
@@ -464,6 +475,10 @@ int main(void) {
 
     // Main loop
     while (1) {
+        if (has_audio) {
+            gbs_audio_update();
+        }
+
         // Check for audio-driven sync (audio reached a minute boundary)
         if (has_video) {
             check_audio_sync();
@@ -474,6 +489,9 @@ int main(void) {
         } else {
             // Audio only - just wait for VBlank and handle input
             VBlankIntrWait();
+            if (has_audio) {
+                gbs_audio_update();
+            }
             handle_input();
         }
 
