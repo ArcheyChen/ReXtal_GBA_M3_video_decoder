@@ -132,8 +132,59 @@ static void print_menu_line(const char* text) {
     iprintf("%s\n", text);
 }
 
+static void format_duration(u32 seconds, char* out, size_t out_size) {
+    u32 minutes = seconds / 60;
+    seconds -= minutes * 60;
+
+    if (minutes >= 60) {
+        u32 hours = minutes / 60;
+        minutes -= hours * 60;
+        snprintf(out, out_size, "%luh %02lum %02lus",
+                 (unsigned long)hours,
+                 (unsigned long)minutes,
+                 (unsigned long)seconds);
+    } else if (minutes > 0) {
+        snprintf(out, out_size, "%lum %02lus",
+                 (unsigned long)minutes,
+                 (unsigned long)seconds);
+    } else {
+        snprintf(out, out_size, "%lus", (unsigned long)seconds);
+    }
+}
+
+static void format_size(u32 bytes, char* out, size_t out_size) {
+    if (bytes >= 1024u * 1024u) {
+        u32 mb10 = (bytes * 10u + 512u * 1024u) / (1024u * 1024u);
+        snprintf(out, out_size, "%lu.%lu MB",
+                 (unsigned long)(mb10 / 10u),
+                 (unsigned long)(mb10 % 10u));
+    } else {
+        snprintf(out, out_size, "%lu KB",
+                 (unsigned long)((bytes + 1023u) / 1024u));
+    }
+}
+
+static const char* audio_mode_name(GbsMode mode) {
+    switch (mode) {
+        case GBS_MODE_STEREO_4BIT:
+            return "Stereo 4-bit";
+        case GBS_MODE_MONO_3BIT:
+            return "Mono 3-bit";
+        case GBS_MODE_MONO_4BIT:
+            return "Mono 4-bit";
+        case GBS_MODE_MONO_2BIT:
+            return "Mono 2-bit";
+        case GBS_MODE_MONO_2BIT_SM:
+            return "Mono 2-bit sm";
+        default:
+            return "Unknown";
+    }
+}
+
 static void show_info(void) {
     char line[32];
+    char value[20];
+    u32 duration_seconds = 0;
 
     iprintf("\x1b[2J");
     print_centered("ReXtal:Ausar's M3 Decoder");
@@ -142,9 +193,21 @@ static void show_info(void) {
     print_menu_line("Info");
     iprintf("\n");
 
+    if (has_video && total_frames > 0) {
+        duration_seconds = total_frames / 10u;
+    } else if (has_audio) {
+        const GbsAudioInfo* info = gbs_audio_get_info();
+        duration_seconds = info->total_samples / info->sample_rate;
+    }
+
+    format_duration(duration_seconds, value, sizeof(value));
+    snprintf(line, sizeof(line), "Length: %s", value);
+    print_menu_line(line);
+
     if (has_video) {
-        u32 video_kb = use_banked_video ? (banked_video_total_size() / 1024) : (video_size / 1024);
-        snprintf(line, sizeof(line), "Video : %lu KB", (unsigned long)video_kb);
+        u32 video_bytes = use_banked_video ? banked_video_total_size() : video_size;
+        format_size(video_bytes, value, sizeof(value));
+        snprintf(line, sizeof(line), "Video : %s", value);
         print_menu_line(line);
         snprintf(line, sizeof(line), "Frames: %lu", (unsigned long)total_frames);
         print_menu_line(line);
@@ -154,9 +217,9 @@ static void show_info(void) {
 
     if (has_audio) {
         const GbsAudioInfo* info = gbs_audio_get_info();
-        uint32_t duration = info->total_samples / info->sample_rate;
-        snprintf(line, sizeof(line), "Audio : %lu sec", (unsigned long)duration);
+        snprintf(line, sizeof(line), "Audio : Mode %lu", (unsigned long)info->mode);
         print_menu_line(line);
+        print_menu_line(audio_mode_name(info->mode));
     } else {
         print_menu_line("Audio : Not found");
     }
