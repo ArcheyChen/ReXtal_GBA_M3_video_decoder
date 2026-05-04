@@ -32,6 +32,14 @@ static u32 minute_key(u32 minute) {
     return obfuscation_mix(0x7258744du ^ minute);
 }
 
+static u32 checked_add_u32(u32 a, u32 b, bool* ok) {
+    if (a > 0xffffffffu - b) {
+        *ok = false;
+        return 0;
+    }
+    return a + b;
+}
+
 static void banked_wait(void) {
     for (volatile int i = 0; i < 64; ++i) {
         __asm__ volatile("nop");
@@ -95,6 +103,7 @@ void banked_copy(u32 rom_offset, void* dst, u32 size) {
 }
 
 static bool header_is_valid(const M3VHeader* header) {
+    bool ok = true;
     if (memcmp(header->magic, "M3V0", 4) != 0) {
         return false;
     }
@@ -110,18 +119,33 @@ static bool header_is_valid(const M3VHeader* header) {
     if (header->frame_index_offset < M3V_HEADER_ROM_OFFSET + sizeof(M3VHeader)) {
         return false;
     }
-    if (header->minute_index_offset < header->frame_index_offset + header->frame_count * 4u) {
+    const u32 frame_index_bytes = header->frame_count * 4u;
+    if ((frame_index_bytes / 4u) != header->frame_count) {
         return false;
     }
-    if (header->video_data_start < M3V_BANK_SIZE || header->video_data_end <= header->video_data_start) {
+    const u32 frame_index_end =
+        checked_add_u32(header->frame_index_offset, frame_index_bytes, &ok);
+    if (!ok || header->minute_index_offset < frame_index_end) {
+        return false;
+    }
+    const u32 minute_index_bytes = header->minute_count * 4u;
+    if ((minute_index_bytes / 4u) != header->minute_count) {
+        return false;
+    }
+    const u32 minute_index_end =
+        checked_add_u32(header->minute_index_offset, minute_index_bytes, &ok);
+    if (!ok || header->video_data_start < minute_index_end ||
+        header->video_data_end <= header->video_data_start) {
         return false;
     }
     if (header->rom_size < header->video_data_end) {
         return false;
     }
     if (header->audio_size != 0) {
-        if (header->audio_header_offset < M3V_BANK_SIZE ||
-            header->audio_block_offset < header->audio_header_offset + 0x200u ||
+        const u32 audio_header_end = checked_add_u32(header->audio_header_offset, 0x200u, &ok);
+        if (header->audio_header_offset < header->video_data_end ||
+            !ok ||
+            header->audio_block_offset < audio_header_end ||
             header->audio_data_end <= header->audio_block_offset ||
             header->rom_size < header->audio_data_end) {
             return false;

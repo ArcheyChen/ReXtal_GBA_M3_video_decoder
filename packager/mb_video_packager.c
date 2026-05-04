@@ -10,11 +10,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define M3V_HEADER_ROM_OFFSET 0x00100000u
-#define M3V_BANK_SIZE 0x00400000u
-#define M3V_BANK_MASK (M3V_BANK_SIZE - 1u)
+#define M3V_HEADER_ROM_OFFSET 0x00040000u
+#define M3V_MEDIA_ALIGNMENT 0x00001000u
+#define M3V_WINDOW_SIZE 0x02000000u
+#define M3V_WINDOW_MASK (M3V_WINDOW_SIZE - 1u)
 #define M3V_DEFAULT_ROM_MB 256u
-#define M3V_DATA_START M3V_BANK_SIZE
 #define GBM_HEADER_SIZE 0x200u
 #define GBS_HEADER_SIZE 0x200u
 #define FRAMES_PER_MINUTE 600u
@@ -84,6 +84,27 @@ static uint32_t read_le32(const uint8_t* data) {
 
 static uint32_t align_to(uint32_t value, uint32_t alignment) {
     return (value + alignment - 1u) & ~(alignment - 1u);
+}
+
+static uint32_t minute_count_for_frames(uint32_t frame_count) {
+    return frame_count == 0 ? 0 : (frame_count + FRAMES_PER_MINUTE - 1u) / FRAMES_PER_MINUTE;
+}
+
+static uint32_t metadata_end_for_frames(uint32_t frame_count) {
+    const uint32_t frame_index_offset = align4(M3V_HEADER_ROM_OFFSET + sizeof(M3VHeader));
+    const uint32_t minute_index_offset = align4(frame_index_offset + frame_count * 4u);
+    return align4(minute_index_offset + minute_count_for_frames(frame_count) * 4u);
+}
+
+static uint32_t video_start_for_frames(uint32_t frame_count) {
+    return align_to(metadata_end_for_frames(frame_count), M3V_MEDIA_ALIGNMENT);
+}
+
+static uint32_t advance_window_bounded(uint32_t offset, uint32_t size) {
+    if ((offset & M3V_WINDOW_MASK) + size > M3V_WINDOW_SIZE) {
+        offset = (offset + M3V_WINDOW_MASK) & ~M3V_WINDOW_MASK;
+    }
+    return offset;
 }
 
 static uint32_t gbs_block_size(const uint8_t* gbs, uint32_t gbs_size) {
@@ -217,9 +238,14 @@ int main(int argc, char** argv) {
     uint32_t* minute_frames = NULL;
     uint32_t minute_count = 0;
     uint32_t minute_capacity = 0;
+    uint32_t* frame_src_offsets = NULL;
+    uint32_t frame_src_count = 0;
+    uint32_t frame_src_capacity = 0;
+    uint32_t* frame_sizes = NULL;
+    uint32_t frame_size_count = 0;
+    uint32_t frame_size_capacity = 0;
 
     uint32_t gbm_offset = GBM_HEADER_SIZE;
-    uint32_t rom_offset = M3V_DATA_START;
     while (gbm_offset + 2u <= gbm_size) {
         const uint16_t frame_len = read_le16(gbm + gbm_offset);
         if (frame_len == 0 || frame_len == 0xFFFF) {
@@ -233,20 +259,67 @@ int main(int argc, char** argv) {
             free(rom);
             free(frame_offsets);
             free(minute_frames);
+            free(frame_src_offsets);
+            free(frame_sizes);
             return 1;
         }
-        if (frame_size > M3V_BANK_SIZE) {
-            fprintf(stderr, "Error: frame too large for one bank\n");
+        if (frame_size > M3V_WINDOW_SIZE) {
+            fprintf(stderr, "Error: frame too large for one ROM window\n");
             free(player);
             free(gbm);
             free(rom);
             free(frame_offsets);
             free(minute_frames);
+            free(frame_src_offsets);
+            free(frame_sizes);
             return 1;
         }
-        if ((rom_offset & M3V_BANK_MASK) + frame_size > M3V_BANK_SIZE) {
-            rom_offset = (rom_offset + M3V_BANK_MASK) & ~M3V_BANK_MASK;
+        if ((frame_size_count % FRAMES_PER_MINUTE) == 0) {
+            if (append_u32(&minute_frames, &minute_count, &minute_capacity, frame_size_count) != 0) {
+                fprintf(stderr, "Error: out of memory\n");
+                free(player);
+                free(gbm);
+                free(rom);
+                free(frame_offsets);
+                free(minute_frames);
+                free(frame_src_offsets);
+                free(frame_sizes);
+                return 1;
+            }
         }
+        if (append_u32(&frame_src_offsets, &frame_src_count, &frame_src_capacity, gbm_offset) != 0 ||
+            append_u32(&frame_sizes, &frame_size_count, &frame_size_capacity, frame_size) != 0) {
+            fprintf(stderr, "Error: out of memory\n");
+            free(player);
+            free(gbm);
+            free(rom);
+            free(frame_offsets);
+            free(minute_frames);
+            free(frame_src_offsets);
+            free(frame_sizes);
+            return 1;
+        }
+        gbm_offset += frame_size;
+    }
+
+    if (frame_size_count == 0) {
+        fprintf(stderr, "Error: no frames found in GBM\n");
+        free(player);
+        free(gbm);
+        free(gbs);
+        free(rom);
+        free(frame_offsets);
+        free(minute_frames);
+        free(frame_src_offsets);
+        free(frame_sizes);
+        return 1;
+    }
+
+    const uint32_t video_data_start = video_start_for_frames(frame_size_count);
+    uint32_t rom_offset = video_data_start;
+    for (uint32_t i = 0; i < frame_size_count; ++i) {
+        const uint32_t frame_size = frame_sizes[i];
+        rom_offset = advance_window_bounded(rom_offset, frame_size);
         if (rom_offset + frame_size > rom_size) {
             fprintf(stderr, "Error: ROM full after %u frames\n", frame_count);
             free(player);
@@ -254,18 +327,9 @@ int main(int argc, char** argv) {
             free(rom);
             free(frame_offsets);
             free(minute_frames);
+            free(frame_src_offsets);
+            free(frame_sizes);
             return 1;
-        }
-        if ((frame_count % FRAMES_PER_MINUTE) == 0) {
-            if (append_u32(&minute_frames, &minute_count, &minute_capacity, frame_count) != 0) {
-                fprintf(stderr, "Error: out of memory\n");
-                free(player);
-                free(gbm);
-                free(rom);
-                free(frame_offsets);
-                free(minute_frames);
-                return 1;
-            }
         }
         if (append_u32(&frame_offsets, &frame_count, &frame_capacity, rom_offset) != 0) {
             fprintf(stderr, "Error: out of memory\n");
@@ -274,22 +338,12 @@ int main(int argc, char** argv) {
             free(rom);
             free(frame_offsets);
             free(minute_frames);
+            free(frame_src_offsets);
+            free(frame_sizes);
             return 1;
         }
-        memcpy(rom + rom_offset, gbm + gbm_offset, frame_size);
-        gbm_offset += frame_size;
+        memcpy(rom + rom_offset, gbm + frame_src_offsets[i], frame_size);
         rom_offset += frame_size;
-    }
-
-    if (frame_count == 0) {
-        fprintf(stderr, "Error: no frames found in GBM\n");
-        free(player);
-        free(gbm);
-        free(gbs);
-        free(rom);
-        free(frame_offsets);
-        free(minute_frames);
-        return 1;
     }
 
     const uint32_t video_data_end = rom_offset;
@@ -298,9 +352,7 @@ int main(int argc, char** argv) {
     uint32_t audio_data_end = 0;
     if (gbs) {
         rom_offset = align4(rom_offset);
-        if ((rom_offset & M3V_BANK_MASK) + GBS_HEADER_SIZE > M3V_BANK_SIZE) {
-            rom_offset = (rom_offset + M3V_BANK_MASK) & ~M3V_BANK_MASK;
-        }
+        rom_offset = advance_window_bounded(rom_offset, GBS_HEADER_SIZE);
         audio_header_offset = rom_offset;
         if (audio_header_offset + GBS_HEADER_SIZE > rom_size) {
             fprintf(stderr, "Error: ROM full before GBS header\n");
@@ -310,21 +362,19 @@ int main(int argc, char** argv) {
             free(rom);
             free(frame_offsets);
             free(minute_frames);
+            free(frame_src_offsets);
+            free(frame_sizes);
             return 1;
         }
         memcpy(rom + audio_header_offset, gbs, GBS_HEADER_SIZE);
 
         audio_block_offset = align_to(audio_header_offset + GBS_HEADER_SIZE, audio_block_size);
-        if ((audio_block_offset & M3V_BANK_MASK) + audio_block_size > M3V_BANK_SIZE) {
-            audio_block_offset = (audio_block_offset + M3V_BANK_MASK) & ~M3V_BANK_MASK;
-        }
+        audio_block_offset = advance_window_bounded(audio_block_offset, audio_block_size);
 
         uint32_t src = GBS_HEADER_SIZE;
         uint32_t dst = audio_block_offset;
         while (src + audio_block_size <= gbs_size) {
-            if ((dst & M3V_BANK_MASK) + audio_block_size > M3V_BANK_SIZE) {
-                dst = (dst + M3V_BANK_MASK) & ~M3V_BANK_MASK;
-            }
+            dst = advance_window_bounded(dst, audio_block_size);
             if (dst + audio_block_size > rom_size) {
                 fprintf(stderr, "Error: ROM full while writing GBS data\n");
                 free(player);
@@ -333,6 +383,8 @@ int main(int argc, char** argv) {
                 free(rom);
                 free(frame_offsets);
                 free(minute_frames);
+                free(frame_src_offsets);
+                free(frame_sizes);
                 return 1;
             }
             memcpy(rom + dst, gbs + src, audio_block_size);
@@ -347,13 +399,15 @@ int main(int argc, char** argv) {
     const uint32_t frame_index_offset = align4(header_offset + sizeof(M3VHeader));
     const uint32_t minute_index_offset = align4(frame_index_offset + frame_count * 4u);
     const uint32_t index_end = align4(minute_index_offset + minute_count * 4u);
-    if (index_end > M3V_BANK_SIZE) {
-        fprintf(stderr, "Error: index does not fit in bank0\n");
+    if (index_end > video_data_start) {
+        fprintf(stderr, "Error: internal M3V metadata layout overlap\n");
         free(player);
         free(gbm);
         free(rom);
         free(frame_offsets);
         free(minute_frames);
+        free(frame_src_offsets);
+        free(frame_sizes);
         return 1;
     }
 
@@ -370,7 +424,7 @@ int main(int argc, char** argv) {
     header.gbm_version = gbm[0x10];
     header.frame_index_offset = frame_index_offset;
     header.minute_index_offset = minute_index_offset;
-    header.video_data_start = M3V_DATA_START;
+    header.video_data_start = video_data_start;
     header.video_data_end = video_data_end;
     header.rom_size = output_size;
     header.audio_header_offset = audio_header_offset;
@@ -390,6 +444,8 @@ int main(int argc, char** argv) {
         free(rom);
         free(frame_offsets);
         free(minute_frames);
+        free(frame_src_offsets);
+        free(frame_sizes);
         return 1;
     }
     fwrite(rom, 1, output_size, out);
@@ -405,5 +461,7 @@ int main(int argc, char** argv) {
     free(rom);
     free(frame_offsets);
     free(minute_frames);
+    free(frame_src_offsets);
+    free(frame_sizes);
     return 0;
 }

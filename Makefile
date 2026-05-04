@@ -27,6 +27,11 @@ INCLUDES	:= include
 DATA		:=
 MUSIC		:=
 
+# Multibank media metadata starts at 0x40000. The player ROM must stay below
+# this offset; if it grows beyond this limit, raise M3V_HEADER_ROM_OFFSET in
+# include/banked_video.h and update the web/packager layout constants together.
+M3V_HEADER_ROM_OFFSET_BYTES := 262144
+
 #---------------------------------------------------------------------------------
 # options for code generation
 #---------------------------------------------------------------------------------
@@ -116,6 +121,11 @@ export LIBPATHS	:=	$(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 $(BUILD):
 	@[ -d $@ ] || mkdir -p $@
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
+	@if [ $$(wc -c < "$(OUTPUT).gba") -gt $(M3V_HEADER_ROM_OFFSET_BYTES) ]; then \
+		echo "Error: $(TARGET).gba exceeds M3V header offset ($(M3V_HEADER_ROM_OFFSET_BYTES) bytes)."; \
+		echo "Move the M3V header/media layout forward before adding more player code."; \
+		exit 1; \
+	fi
 
 #---------------------------------------------------------------------------------
 clean:
