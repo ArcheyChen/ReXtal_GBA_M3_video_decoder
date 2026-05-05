@@ -1,7 +1,57 @@
 #include "gbm_decoder.h"
+#include "m3_trace.h"
 #include <string.h>
 
 #define ROW_BYTES (FRAME_WIDTH * 2)
+
+#if M3_TRACE && M3_TRACE_DETAIL
+static u32 trace_copy_calls;
+static u32 trace_copy_pixels;
+static u32 trace_delta_calls;
+static u32 trace_delta_pixels;
+static u32 trace_fill_calls;
+static u32 trace_fill_pixels;
+
+static inline void trace_reset_frame_stats(void) {
+    trace_copy_calls = 0;
+    trace_copy_pixels = 0;
+    trace_delta_calls = 0;
+    trace_delta_pixels = 0;
+    trace_fill_calls = 0;
+    trace_fill_pixels = 0;
+}
+
+static inline void trace_emit_frame_stats(u32 flag_bytes, u32 palette_bytes, u32 payload_bytes) {
+    m3_trace_value(M3_TRACE_ZONE_COPY_CALLS, trace_copy_calls);
+    m3_trace_value(M3_TRACE_ZONE_COPY_PIXELS, trace_copy_pixels);
+    m3_trace_value(M3_TRACE_ZONE_DELTA_CALLS, trace_delta_calls);
+    m3_trace_value(M3_TRACE_ZONE_DELTA_PIXELS, trace_delta_pixels);
+    m3_trace_value(M3_TRACE_ZONE_FILL_CALLS, trace_fill_calls);
+    m3_trace_value(M3_TRACE_ZONE_FILL_PIXELS, trace_fill_pixels);
+    m3_trace_value(M3_TRACE_ZONE_FLAG_BYTES, flag_bytes);
+    m3_trace_value(M3_TRACE_ZONE_PALETTE_BYTES, palette_bytes);
+    m3_trace_value(M3_TRACE_ZONE_PAYLOAD_BYTES, payload_bytes);
+}
+
+#define TRACE_COPY(rows, pixels_per_row) do { \
+    ++trace_copy_calls; \
+    trace_copy_pixels += (u32)(rows) * (u32)(pixels_per_row); \
+} while (0)
+#define TRACE_DELTA(rows, pixels_per_row) do { \
+    ++trace_delta_calls; \
+    trace_delta_pixels += (u32)(rows) * (u32)(pixels_per_row); \
+} while (0)
+#define TRACE_FILL(rows, pixels_per_row) do { \
+    ++trace_fill_calls; \
+    trace_fill_pixels += (u32)(rows) * (u32)(pixels_per_row); \
+} while (0)
+#else
+#define trace_reset_frame_stats() ((void)0)
+#define trace_emit_frame_stats(flag_bytes, palette_bytes, payload_bytes) ((void)0)
+#define TRACE_COPY(rows, pixels_per_row) ((void)0)
+#define TRACE_DELTA(rows, pixels_per_row) ((void)0)
+#define TRACE_FILL(rows, pixels_per_row) ((void)0)
+#endif
 
 // XOR key for decoding flag_bytes (default to Gen1)
 static u16 xor_key = 0xD669;
@@ -78,8 +128,7 @@ static inline u16 frame_field_key(u32 frame_index, u32 salt) {
 }
 
 // Critical Path: next_bit
-// Placing in IWRAM
-static IWRAM_CODE int next_bit(DecodeContext *ctx) {
+static inline __attribute__((always_inline)) int next_bit(DecodeContext *ctx) {
     if (ctx->state == (1u << 31)) {
         u32 word = read_u32_unaligned(ctx->flag_ptr);
         ctx->flag_ptr += 4;
@@ -93,7 +142,7 @@ static IWRAM_CODE int next_bit(DecodeContext *ctx) {
 }
 
 // Read 2 bits at once - optimized for common decode patterns
-static IWRAM_CODE int next_2bits(DecodeContext *ctx) {
+static inline __attribute__((always_inline)) int next_2bits(DecodeContext *ctx) {
     u32 state = ctx->state;
 
     // Fast path: sentinel is in low 30 bits, we have at least 2 data bits
@@ -144,36 +193,122 @@ static inline u8 read_code(DecodeContext *ctx) {
 // Use 32-bit writes to EWRAM for better throughput
 // Use pointer increment instead of recalculating offset each row
 #define ROW_STRIDE (ROW_BYTES >> 1)  // stride in u16 units (240)
-
 static IWRAM_CODE void copy_u32_block(DecodeContext *ctx, int dst_off, int ref_off, int rows, int words) {
+    TRACE_COPY(rows, words * 2);
     u32 *d = (u32*)(ctx->dst + (dst_off >> 1));
     const u16 *s = ctx->ref + (ref_off >> 1);
-
-    for (int r = 0; r < rows; r++) {
-        const u16 *sp = s;
-        for (int i = 0; i < words; i++) {
-            // Read two u16 from ref (VRAM), write as u32 to dst (EWRAM)
-            u32 val = sp[0] | ((u32)sp[1] << 16);
-            d[i] = val;
-            sp += 2;
+    if ((ref_off & 2) == 0) {
+        const u32 *sw = (const u32*)s;
+        switch (words) {
+        case 1:
+            for (int r = 0; r < rows; r++) {
+                d[0] = sw[0];
+                d = (u32*)((u16*)d + ROW_STRIDE);
+                sw = (const u32*)((const u16*)sw + ROW_STRIDE);
+            }
+            return;
+        case 2:
+            for (int r = 0; r < rows; r++) {
+                d[0] = sw[0];
+                d[1] = sw[1];
+                d = (u32*)((u16*)d + ROW_STRIDE);
+                sw = (const u32*)((const u16*)sw + ROW_STRIDE);
+            }
+            return;
+        case 4:
+            for (int r = 0; r < rows; r++) {
+                d[0] = sw[0];
+                d[1] = sw[1];
+                d[2] = sw[2];
+                d[3] = sw[3];
+                d = (u32*)((u16*)d + ROW_STRIDE);
+                sw = (const u32*)((const u16*)sw + ROW_STRIDE);
+            }
+            return;
+        default:
+            break;
         }
-        d = (u32*)((u16*)d + ROW_STRIDE);
-        s += ROW_STRIDE;
+    }
+    switch (words) {
+    case 1:
+        for (int r = 0; r < rows; r++) {
+            d[0] = s[0] | ((u32)s[1] << 16);
+            d = (u32*)((u16*)d + ROW_STRIDE);
+            s += ROW_STRIDE;
+        }
+        break;
+    case 2:
+        for (int r = 0; r < rows; r++) {
+            d[0] = s[0] | ((u32)s[1] << 16);
+            d[1] = s[2] | ((u32)s[3] << 16);
+            d = (u32*)((u16*)d + ROW_STRIDE);
+            s += ROW_STRIDE;
+        }
+        break;
+    case 4:
+        for (int r = 0; r < rows; r++) {
+            d[0] = s[0] | ((u32)s[1] << 16);
+            d[1] = s[2] | ((u32)s[3] << 16);
+            d[2] = s[4] | ((u32)s[5] << 16);
+            d[3] = s[6] | ((u32)s[7] << 16);
+            d = (u32*)((u16*)d + ROW_STRIDE);
+            s += ROW_STRIDE;
+        }
+        break;
+    default:
+        for (int r = 0; r < rows; r++) {
+            const u16 *sp = s;
+            for (int i = 0; i < words; i++) {
+                d[i] = sp[0] | ((u32)sp[1] << 16);
+                sp += 2;
+            }
+            d = (u32*)((u16*)d + ROW_STRIDE);
+            s += ROW_STRIDE;
+        }
+        break;
     }
 }
 
 static IWRAM_CODE void fill_u32_block(DecodeContext *ctx, int dst_off, int rows, int words, u16 color) {
+    TRACE_FILL(rows, words * 2);
     u32 color32 = color | ((u32)color << 16);
     u32 *d = (u32*)(ctx->dst + (dst_off >> 1));
-    for (int r = 0; r < rows; r++) {
-        for (int i = 0; i < words; i++) {
-            d[i] = color32;
+    switch (words) {
+    case 1:
+        for (int r = 0; r < rows; r++) {
+            d[0] = color32;
+            d = (u32*)((u16*)d + ROW_STRIDE);
         }
-        d = (u32*)((u16*)d + ROW_STRIDE);
+        break;
+    case 2:
+        for (int r = 0; r < rows; r++) {
+            d[0] = color32;
+            d[1] = color32;
+            d = (u32*)((u16*)d + ROW_STRIDE);
+        }
+        break;
+    case 4:
+        for (int r = 0; r < rows; r++) {
+            d[0] = color32;
+            d[1] = color32;
+            d[2] = color32;
+            d[3] = color32;
+            d = (u32*)((u16*)d + ROW_STRIDE);
+        }
+        break;
+    default:
+        for (int r = 0; r < rows; r++) {
+            for (int i = 0; i < words; i++) {
+                d[i] = color32;
+            }
+            d = (u32*)((u16*)d + ROW_STRIDE);
+        }
+        break;
     }
 }
 
 static IWRAM_CODE void delta_u32_block(DecodeContext *ctx, int dst_off, int ref_off, int rows, int words, s16 delta) {
+    TRACE_DELTA(rows, words * 2);
     u32 *d = (u32*)(ctx->dst + (dst_off >> 1));
     const u16 *s = ctx->ref + (ref_off >> 1);
     // RGB555: bit15 is unused, can absorb carry from lower pixel
@@ -182,10 +317,8 @@ static IWRAM_CODE void delta_u32_block(DecodeContext *ctx, int dst_off, int ref_
     for (int r = 0; r < rows; r++) {
         const u16 *sp = s;
         for (int i = 0; i < words; i++) {
-            // Read two u16 from VRAM, combine to u32
             u32 val = sp[0] | ((u32)sp[1] << 16);
-            // Clear bit15 and bit31, add delta, overflow from low u16 goes to bit15 (harmless)
-            d[i] = ((val & 0x7FFF7FFF) + delta32);
+            d[i] = (val & 0x7FFF7FFF) + delta32;
             sp += 2;
         }
         d = (u32*)((u16*)d + ROW_STRIDE);
@@ -194,6 +327,7 @@ static IWRAM_CODE void delta_u32_block(DecodeContext *ctx, int dst_off, int ref_
 }
 
 static IWRAM_CODE void copy_u16_block(DecodeContext *ctx, int dst_off, int ref_off, int rows, int halfwords) {
+    TRACE_COPY(rows, halfwords);
     u16 *d = ctx->dst + (dst_off >> 1);
     const u16 *s = ctx->ref + (ref_off >> 1);
     for (int r = 0; r < rows; r++) {
@@ -206,6 +340,7 @@ static IWRAM_CODE void copy_u16_block(DecodeContext *ctx, int dst_off, int ref_o
 }
 
 static IWRAM_CODE void fill_u16_block(DecodeContext *ctx, int dst_off, int rows, int halfwords, u16 color) {
+    TRACE_FILL(rows, halfwords);
     u16 *d = ctx->dst + (dst_off >> 1);
     for (int r = 0; r < rows; r++) {
         for (int i = 0; i < halfwords; i++) {
@@ -216,6 +351,7 @@ static IWRAM_CODE void fill_u16_block(DecodeContext *ctx, int dst_off, int rows,
 }
 
 static IWRAM_CODE void delta_u16_block(DecodeContext *ctx, int dst_off, int ref_off, int rows, int halfwords, s16 delta) {
+    TRACE_DELTA(rows, halfwords);
     u16 *d = ctx->dst + (dst_off >> 1);
     const u16 *s = ctx->ref + (ref_off >> 1);
     for (int r = 0; r < rows; r++) {
@@ -227,10 +363,17 @@ static IWRAM_CODE void delta_u16_block(DecodeContext *ctx, int dst_off, int ref_
     }
 }
 
+#define GBM_ALWAYS_INLINE static inline __attribute__((always_inline))
+#if M3_TRACE_DETAIL
+#define GBM_2X2_ATTR static IWRAM_CODE
+#else
+#define GBM_2X2_ATTR GBM_ALWAYS_INLINE
+#endif
+
 // Forward declarations
 static IWRAM_CODE void decode_block_8x4(DecodeContext *ctx);
 static IWRAM_CODE void decode_block_4x8(DecodeContext *ctx);
-static IWRAM_CODE void decode_block_4x4(DecodeContext *ctx);
+GBM_ALWAYS_INLINE void decode_block_4x4(DecodeContext *ctx);
 static IWRAM_CODE void decode_block_8x2(DecodeContext *ctx);
 static IWRAM_CODE void decode_block_2x8(DecodeContext *ctx);
 static IWRAM_CODE void decode_block_2x4(DecodeContext *ctx);
@@ -238,10 +381,10 @@ static IWRAM_CODE void decode_block_4x2(DecodeContext *ctx);
 static IWRAM_CODE void decode_block_1x8(DecodeContext *ctx);
 static IWRAM_CODE void decode_block_8x1(DecodeContext *ctx);
 static IWRAM_CODE void decode_block_1x4(DecodeContext *ctx);
-static IWRAM_CODE void decode_block_2x2(DecodeContext *ctx);
+GBM_2X2_ATTR void decode_block_2x2(DecodeContext *ctx);
 static IWRAM_CODE void decode_block_4x1(DecodeContext *ctx);
-static IWRAM_CODE void decode_block_1x2(DecodeContext *ctx);
-static IWRAM_CODE void decode_block_2x1(DecodeContext *ctx);
+GBM_ALWAYS_INLINE void decode_block_1x2(DecodeContext *ctx);
+GBM_ALWAYS_INLINE void decode_block_2x1(DecodeContext *ctx);
 
 
 // Functions
@@ -424,7 +567,7 @@ static IWRAM_CODE void decode_block_1x8(DecodeContext *ctx) {
     }
 }
 
-static IWRAM_CODE void decode_block_4x4(DecodeContext *ctx) {
+GBM_ALWAYS_INLINE void decode_block_4x4(DecodeContext *ctx) {
     switch (next_2bits(ctx)) {
     case 0: // 00: copy from same position
         // copy_u32_block(ctx, ctx->block_offset, ctx->block_offset, 4, 2); // no-op: VRAM==BUF
@@ -640,7 +783,7 @@ static IWRAM_CODE void decode_block_1x4(DecodeContext *ctx) {
     }
 }
 
-static IWRAM_CODE void decode_block_2x2(DecodeContext *ctx) {
+GBM_2X2_ATTR void decode_block_2x2(DecodeContext *ctx) {
     switch (next_2bits(ctx)) {
     case 0: // 00: copy from same position
         // copy_u32_block(ctx, ctx->block_offset, ctx->block_offset, 2, 1); // no-op: VRAM==BUF
@@ -709,7 +852,7 @@ static IWRAM_CODE void decode_block_4x1(DecodeContext *ctx) {
     }
 }
 
-static IWRAM_CODE void decode_block_1x2(DecodeContext *ctx) {
+GBM_ALWAYS_INLINE void decode_block_1x2(DecodeContext *ctx) {
     switch (next_2bits(ctx)) {
     case 0: // 00: copy from same position
         // copy_u16_block(ctx, ctx->block_offset, ctx->block_offset, 2, 1); // no-op: VRAM==BUF
@@ -745,7 +888,7 @@ static IWRAM_CODE void decode_block_1x2(DecodeContext *ctx) {
     }
 }
 
-static IWRAM_CODE void decode_block_2x1(DecodeContext *ctx) {
+GBM_ALWAYS_INLINE void decode_block_2x1(DecodeContext *ctx) {
     switch (next_2bits(ctx)) {
     case 0: // 00: copy from same position
         // copy_u32_block(ctx, ctx->block_offset, ctx->block_offset, 1, 1); // no-op: VRAM==BUF
@@ -800,6 +943,7 @@ static u32 IWRAM_CODE gbm_decode_frame_internal(const u8 *data, u32 offset, u16 
     u32 next_offset = offset + 2 + frame_len;
 
     u16 flag_bytes = bit_enc ^ xor_key;
+    trace_reset_frame_stats();
 
     DecodeContext ctx;
     ctx.state = 0x80000000; // Initial state
@@ -829,6 +973,8 @@ static u32 IWRAM_CODE gbm_decode_frame_internal(const u8 *data, u32 offset, u16 
             decode_block_8x8(&ctx);
         }
     }
+
+    trace_emit_frame_stats(flag_bytes, palette_bytes, next_offset - pal_end);
 
     return next_offset;
 }

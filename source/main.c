@@ -25,6 +25,7 @@
 #include "banked_video.h"
 #include "gbs_audio.h"
 #include "gbm_decoder.h"
+#include "m3_trace.h"
 
 // Fast frame copy using ARM ldmia/stmia
 // Unlike DMA, CPU memory access doesn't monopolize the bus and won't
@@ -308,7 +309,7 @@ static void restore_video_display(void) {
 // Pre-calculated I-frame offsets (one per minute)
 // Maximum 256 minutes (~4 hours) should be enough
 #define MAX_MINUTES 256
-static u32 iframe_offsets[MAX_MINUTES];
+EWRAM_BSS static u32 iframe_offsets[MAX_MINUTES];
 static u32 total_minutes = 0;
 
 // Scan video to find I-frame offsets (every 600 frames)
@@ -555,7 +556,9 @@ static void update_current_minute_after_display(void) {
 }
 
 static void display_decoded_frame(void) {
+    m3_trace_begin(M3_TRACE_ZONE_VRAM_COPY);
     copy_frame_to_vram(frame_buffer, (void*)0x06000000, 240 * 160 * 2);
+    m3_trace_end(M3_TRACE_ZONE_VRAM_COPY);
     current_frame++;
     update_current_minute_after_display();
 }
@@ -588,9 +591,14 @@ static void run_pause_menu_audio_only(void) {
 static void decode_next_frame(void) {
     if (!has_video) return;
 
+    m3_trace_frame(current_frame);
+    m3_trace_value(M3_TRACE_ZONE_SYNC_LAG, target_frame > current_frame ? target_frame - current_frame : 0);
+    m3_trace_begin(M3_TRACE_ZONE_VIDEO_DECODE);
+
     if (use_banked_video) {
         const u32 frame_count = banked_video_frame_count();
         if (frame_count == 0) {
+            m3_trace_end(M3_TRACE_ZONE_VIDEO_DECODE);
             return;
         }
         if (current_frame >= frame_count) {
@@ -600,6 +608,7 @@ static void decode_next_frame(void) {
         }
         const u8* frame_ptr = banked_video_frame_ptr(current_frame);
         if (frame_ptr) {
+            m3_trace_value(M3_TRACE_ZONE_FRAME_BYTES, frame_ptr[0] | (frame_ptr[1] << 8));
             if ((current_frame % FRAMES_PER_MINUTE) == 0) {
                 memset(frame_buffer, 0, sizeof(frame_buffer));
                 if (banked_video_is_metadata_obfuscated()) {
@@ -616,10 +625,14 @@ static void decode_next_frame(void) {
                 }
             }
         }
+        m3_trace_end(M3_TRACE_ZONE_VIDEO_DECODE);
         return;
     }
 
-    if (!video_data) return;
+    if (!video_data) {
+        m3_trace_end(M3_TRACE_ZONE_VIDEO_DECODE);
+        return;
+    }
 
     // Check for end of video
     if (video_offset + 2 >= video_size) {
@@ -642,6 +655,8 @@ static void decode_next_frame(void) {
         frame_len = video_data[video_offset] | (video_data[video_offset + 1] << 8);
     }
 
+    m3_trace_value(M3_TRACE_ZONE_FRAME_BYTES, frame_len);
+
     // Decode frame (dst = EWRAM buffer, ref = VRAM for delta)
     if ((current_frame % FRAMES_PER_MINUTE) == 0) {
         memset(frame_buffer, 0, sizeof(frame_buffer));
@@ -649,6 +664,7 @@ static void decode_next_frame(void) {
     } else {
         video_offset = gbm_decode_frame(video_data, video_offset, frame_buffer, (const u16*)0x06000000);
     }
+    m3_trace_end(M3_TRACE_ZONE_VIDEO_DECODE);
 }
 
 // Check if audio triggered a sync point (called from main loop)

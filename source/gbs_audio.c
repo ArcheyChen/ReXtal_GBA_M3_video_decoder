@@ -8,6 +8,7 @@
 #include "gbs_audio.h"
 
 #include "banked_video.h"
+#include "m3_trace.h"
 
 #include <gba_dma.h>
 #include <gba_interrupt.h>
@@ -40,8 +41,8 @@
 // When Timer1 counts AUDIO_BUFFER_SAMPLES overflows, it triggers IRQ to swap buffers.
 //
 // Swap frequency = sample_rate / AUDIO_BUFFER_SAMPLES
-// Examples at 22050Hz: 368->60Hz, 512->43Hz, 736->30Hz, 1024->21.5Hz, 1472->15Hz
-// Examples at 11025Hz: 368->30Hz, 512->21.5Hz, 736->15Hz, 1024->10.8Hz
+// Examples at 22050Hz: 368->60Hz, 512->43Hz, 768->28.7Hz, 1024->21.5Hz, 1472->15Hz
+// Examples at 11025Hz: 368->30Hz, 512->21.5Hz, 768->14.4Hz, 1024->10.8Hz
 //
 // Larger buffer = fewer interrupts but higher latency and more memory usage.
 // Buffer memory = AUDIO_BUFFER_SAMPLES * 2 (double buffering) * channels bytes.
@@ -52,7 +53,7 @@
 //   Mode 3/4 (mono 2bit): 0.25 byte/sample -> 256 bytes
 //
 // Value should be divisible by 8 for Mode 1 compatibility (8 samples per 3 bytes).
-#define AUDIO_BUFFER_SAMPLES    1024
+#define AUDIO_BUFFER_SAMPLES    768
 #define AUDIO_BUFFER_COUNT      2
 
 // Compressed GBS block cache.
@@ -794,9 +795,11 @@ static IWRAM_CODE void audio_timer1_handler(void) {
     }
 
     // Decode into buffer that just finished playing
+    m3_trace_begin(M3_TRACE_ZONE_AUDIO_IRQ);
     decode_buffer_preserve_bank(audio_buffer_left[play_buffer],
                                 state.info.channels == 2 ? audio_buffer_right[play_buffer] : NULL,
                                 AUDIO_BUFFER_SAMPLES);
+    m3_trace_end(M3_TRACE_ZONE_AUDIO_IRQ);
 
     // Check if we crossed a minute boundary (using comparison instead of division)
     if (state.info.samples_decoded >= state.next_minute_sample) {
@@ -1049,7 +1052,9 @@ void gbs_audio_start(void) {
 }
 
 void gbs_audio_update(void) {
+    m3_trace_begin(M3_TRACE_ZONE_AUDIO_CACHE);
     cache_fill_blocks(GBS_BLOCK_CACHE_UPDATE_MAX);
+    m3_trace_end(M3_TRACE_ZONE_AUDIO_CACHE);
 }
 
 void gbs_audio_stop(void) {

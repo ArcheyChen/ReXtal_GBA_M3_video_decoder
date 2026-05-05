@@ -1,5 +1,6 @@
 #include "banked_video.h"
 
+#include <gba_base.h>
 #include <string.h>
 
 #define MAPPER_CONFIG1 ((volatile u8*) 0x0E000002)
@@ -8,12 +9,12 @@
 
 #define INDEX_CACHE_FRAMES 256u
 
-static M3VHeader active_header;
+EWRAM_BSS static M3VHeader active_header;
 static bool active;
 static u32 current_bank = 0xffffffffu;
 static u32 index_cache_start = 0xffffffffu;
 static u32 index_cache_count;
-static u32 index_cache[INDEX_CACHE_FRAMES];
+EWRAM_BSS static u32 index_cache[INDEX_CACHE_FRAMES];
 
 static u32 obfuscation_mix(u32 value) {
     value ^= value >> 16;

@@ -42,6 +42,8 @@ CFLAGS	:=	-g -Wall -O2\
 		$(ARCH)
 
 CFLAGS	+=	$(INCLUDE)
+CFLAGS	+=	-DM3_TRACE=$(if $(M3_TRACE),$(M3_TRACE),0)
+CFLAGS	+=	-DM3_TRACE_DETAIL=$(if $(M3_TRACE_DETAIL),$(M3_TRACE_DETAIL),0)
 
 CXXFLAGS	:=	$(CFLAGS) -fno-rtti -fno-exceptions
 
