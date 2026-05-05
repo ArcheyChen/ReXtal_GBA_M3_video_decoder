@@ -954,11 +954,8 @@ static u32 IWRAM_CODE gbm_decode_frame_internal(const u8 *data, u32 offset, u16 
     u32 pal_end = pal_start + palette_bytes;
     
     ctx.flag_ptr = data + flag_start;
-    ctx.flag_end = data + flag_end;
     ctx.palette_ptr = data + pal_start;
-    ctx.palette_end = data + pal_end;
     ctx.payload_ptr = data + pal_end;
-    ctx.payload_end = data + next_offset;
     
     ctx.dst = dst;
     // If ref is null, use dst (intra prediction behavior)

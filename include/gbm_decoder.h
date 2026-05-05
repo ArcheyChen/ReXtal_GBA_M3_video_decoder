@@ -18,13 +18,10 @@
 typedef struct {
     u32 state;
     const u8 *flag_ptr; // Current position in flag stream (must be 4-byte aligned reads)
-    const u8 *flag_end;
 
     const u8 *palette_ptr; // Current position in palette stream
-    const u8 *palette_end;
 
     const u8 *payload_ptr; // Current position in payload stream
-    const u8 *payload_end;
 
     u16 *dst;       // Destination buffer (current frame)
     const u16 *ref; // Reference buffer (previous frame)

@@ -27,30 +27,13 @@
 #include "gbm_decoder.h"
 #include "m3_trace.h"
 
-// Fast frame copy using ARM ldmia/stmia
-// Unlike DMA, CPU memory access doesn't monopolize the bus and won't
-// starve audio FIFO DMA. Audio DMA has higher priority and can interleave.
-//
-// Copies 128 bytes per iteration (4x unrolled, 32 bytes each).
-// Total: 76800 bytes = 600 iterations.
-__attribute__((target("arm"), noinline))
 static void copy_frame_to_vram(const void* src, void* dst, u32 size) {
-    asm volatile(
-        "1:                         \n"
-        "   ldmia %[src]!, {r2-r9}  \n"
-        "   stmia %[dst]!, {r2-r9}  \n"
-        "   ldmia %[src]!, {r2-r9}  \n"
-        "   stmia %[dst]!, {r2-r9}  \n"
-        "   ldmia %[src]!, {r2-r9}  \n"
-        "   stmia %[dst]!, {r2-r9}  \n"
-        "   ldmia %[src]!, {r2-r9}  \n"
-        "   stmia %[dst]!, {r2-r9}  \n"
-        "   subs  %[size], %[size], #128 \n"
-        "   bgt   1b                \n"
-        : [src] "+r" (src), [dst] "+r" (dst), [size] "+r" (size)
-        :
-        : "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "memory", "cc"
-    );
+    REG_DMA3CNT = 0;
+    REG_DMA3SAD = (u32)src;
+    REG_DMA3DAD = (u32)dst;
+    REG_DMA3CNT = DMA_SRC_INC | DMA_DST_INC | DMA32 | DMA_ENABLE | (size >> 2);
+    while (REG_DMA3CNT & DMA_ENABLE) {
+    }
 }
 
 // EWRAM buffer for video frame (240 * 160 = 38400 pixels)
@@ -555,6 +538,10 @@ static void update_current_minute_after_display(void) {
     }
 }
 
+static inline bool is_minute_iframe(void) {
+    return current_frame == current_minute * FRAMES_PER_MINUTE;
+}
+
 static void display_decoded_frame(void) {
     m3_trace_begin(M3_TRACE_ZONE_VRAM_COPY);
     copy_frame_to_vram(frame_buffer, (void*)0x06000000, 240 * 160 * 2);
@@ -609,7 +596,7 @@ static void decode_next_frame(void) {
         const u8* frame_ptr = banked_video_frame_ptr(current_frame);
         if (frame_ptr) {
             m3_trace_value(M3_TRACE_ZONE_FRAME_BYTES, frame_ptr[0] | (frame_ptr[1] << 8));
-            if ((current_frame % FRAMES_PER_MINUTE) == 0) {
+            if (is_minute_iframe()) {
                 memset(frame_buffer, 0, sizeof(frame_buffer));
                 if (banked_video_is_metadata_obfuscated()) {
                     gbm_decode_frame_obfuscated(frame_ptr, 0, frame_buffer, NULL, current_frame);
@@ -658,7 +645,7 @@ static void decode_next_frame(void) {
     m3_trace_value(M3_TRACE_ZONE_FRAME_BYTES, frame_len);
 
     // Decode frame (dst = EWRAM buffer, ref = VRAM for delta)
-    if ((current_frame % FRAMES_PER_MINUTE) == 0) {
+    if (is_minute_iframe()) {
         memset(frame_buffer, 0, sizeof(frame_buffer));
         video_offset = gbm_decode_frame(video_data, video_offset, frame_buffer, NULL);
     } else {
