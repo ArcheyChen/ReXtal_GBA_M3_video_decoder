@@ -595,16 +595,29 @@ static void decode_next_frame(void) {
         }
         const u8* frame_ptr = banked_video_frame_ptr(current_frame);
         if (frame_ptr) {
-            m3_trace_value(M3_TRACE_ZONE_FRAME_BYTES, frame_ptr[0] | (frame_ptr[1] << 8));
+            const bool compact_frame = banked_video_uses_compact_frames();
+            m3_trace_value(M3_TRACE_ZONE_FRAME_BYTES,
+                           compact_frame ? 0 : (frame_ptr[0] | (frame_ptr[1] << 8)));
             if (is_minute_iframe()) {
                 memset(frame_buffer, 0, sizeof(frame_buffer));
-                if (banked_video_is_metadata_obfuscated()) {
+                if (compact_frame && banked_video_is_metadata_obfuscated()) {
+                    gbm_decode_frame_body_obfuscated(frame_ptr, 0, 0, frame_buffer, NULL,
+                                                     current_frame);
+                } else if (compact_frame) {
+                    gbm_decode_frame_body(frame_ptr, 0, 0, frame_buffer, NULL);
+                } else if (banked_video_is_metadata_obfuscated()) {
                     gbm_decode_frame_obfuscated(frame_ptr, 0, frame_buffer, NULL, current_frame);
                 } else {
                     gbm_decode_frame(frame_ptr, 0, frame_buffer, NULL);
                 }
             } else {
-                if (banked_video_is_metadata_obfuscated()) {
+                if (compact_frame && banked_video_is_metadata_obfuscated()) {
+                    gbm_decode_frame_body_obfuscated(frame_ptr, 0, 0, frame_buffer,
+                                                    (const u16*)0x06000000, current_frame);
+                } else if (compact_frame) {
+                    gbm_decode_frame_body(frame_ptr, 0, 0, frame_buffer,
+                                          (const u16*)0x06000000);
+                } else if (banked_video_is_metadata_obfuscated()) {
                     gbm_decode_frame_obfuscated(frame_ptr, 0, frame_buffer, (const u16*)0x06000000,
                                                 current_frame);
                 } else {

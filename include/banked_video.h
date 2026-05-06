@@ -9,6 +9,7 @@
 #define M3V_WINDOW_SIZE 0x02000000u
 #define M3V_WINDOW_MASK (M3V_WINDOW_SIZE - 1u)
 #define M3V_FLAG_METADATA_OBFUSCATED 0x00000001u
+#define M3V_FLAG_COMPACT_FRAMES 0x00000002u
 
 typedef struct __attribute__((packed)) {
     char magic[4];
@@ -41,6 +42,7 @@ u32 banked_video_total_size(void);
 u8 banked_video_gbm_version(void);
 bool banked_video_has_audio(void);
 bool banked_video_is_metadata_obfuscated(void);
+bool banked_video_uses_compact_frames(void);
 u32 banked_video_audio_header_offset(void);
 u32 banked_video_audio_block_offset(void);
 u32 banked_video_audio_size(void);

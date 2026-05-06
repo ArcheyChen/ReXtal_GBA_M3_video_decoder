@@ -15,6 +15,7 @@
 #define M3V_WINDOW_SIZE 0x02000000u
 #define M3V_WINDOW_MASK (M3V_WINDOW_SIZE - 1u)
 #define M3V_DEFAULT_ROM_MB 256u
+#define M3V_FLAG_COMPACT_FRAMES 0x00000002u
 #define GBM_HEADER_SIZE 0x200u
 #define GBS_HEADER_SIZE 0x200u
 #define FRAMES_PER_MINUTE 600u
@@ -251,8 +252,9 @@ int main(int argc, char** argv) {
         if (frame_len == 0 || frame_len == 0xFFFF) {
             break;
         }
-        const uint32_t frame_size = 2u + frame_len;
-        if (gbm_offset + frame_size > gbm_size) {
+        const uint32_t frame_size = frame_len;
+        const uint32_t gbm_record_size = 2u + frame_len;
+        if (gbm_offset + gbm_record_size > gbm_size) {
             fprintf(stderr, "Error: truncated GBM frame at 0x%X\n", gbm_offset);
             free(player);
             free(gbm);
@@ -287,7 +289,7 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
-        if (append_u32(&frame_src_offsets, &frame_src_count, &frame_src_capacity, gbm_offset) != 0 ||
+        if (append_u32(&frame_src_offsets, &frame_src_count, &frame_src_capacity, gbm_offset + 2u) != 0 ||
             append_u32(&frame_sizes, &frame_size_count, &frame_size_capacity, frame_size) != 0) {
             fprintf(stderr, "Error: out of memory\n");
             free(player);
@@ -299,7 +301,7 @@ int main(int argc, char** argv) {
             free(frame_sizes);
             return 1;
         }
-        gbm_offset += frame_size;
+        gbm_offset += gbm_record_size;
     }
 
     if (frame_size_count == 0) {
@@ -319,6 +321,7 @@ int main(int argc, char** argv) {
     uint32_t rom_offset = video_data_start;
     for (uint32_t i = 0; i < frame_size_count; ++i) {
         const uint32_t frame_size = frame_sizes[i];
+        rom_offset = align4(rom_offset);
         rom_offset = advance_window_bounded(rom_offset, frame_size);
         if (rom_offset + frame_size > rom_size) {
             fprintf(stderr, "Error: ROM full after %u frames\n", frame_count);
@@ -417,7 +420,7 @@ int main(int argc, char** argv) {
     memcpy(header.magic, "M3V0", 4);
     header.version = 1;
     header.header_size = sizeof(M3VHeader);
-    header.flags = 0;
+    header.flags = M3V_FLAG_COMPACT_FRAMES;
     header.fps = 10;
     header.frame_count = frame_count;
     header.minute_count = minute_count;

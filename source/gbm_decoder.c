@@ -104,18 +104,10 @@ __attribute__((section(".iwram.rodata"))) static const s16 CODEBOOK_OFFSETS[] = 
 };
 
 // Inline helpers
-static inline u32 read_u32_unaligned(const u8 *ptr) {
-    // GBA supports unaligned loads? NO. ARM7TDMI does NOT support unaligned loads correctly (it rotates).
-    // We must construct it.
-    return ptr[0] | (ptr[1] << 8) | (ptr[2] << 16) | (ptr[3] << 24);
-}
-
-static inline u32 read_u32_halfword_aligned(const u8 *ptr) {
-    // GBM frame fields and frame records are 16-bit aligned. The flag stream is
-    // not always 32-bit aligned in our packed layout, but it is still safe to
-    // read as two little-endian halfwords on ARM7TDMI.
-    const u16 *h = (const u16*)ptr;
-    return (u32)h[0] | ((u32)h[1] << 16);
+static inline u32 read_u32_flag_stream(const u8 *ptr) {
+    // Compact multibank frames store the body at a 4-byte aligned address:
+    // +0 bit_enc, +2 palette_bytes, +4 flag stream.
+    return *(const u32*)ptr;
 }
 
 static inline u16 read_u16_unaligned(const u8 *ptr) {
@@ -138,7 +130,7 @@ static inline u16 frame_field_key(u32 frame_index, u32 salt) {
 // Critical Path: next_bit
 static inline __attribute__((always_inline)) int next_bit(DecodeContext *ctx) {
     if (ctx->state == (1u << 31)) {
-        u32 word = read_u32_halfword_aligned(ctx->flag_ptr);
+        u32 word = read_u32_flag_stream(ctx->flag_ptr);
         ctx->flag_ptr += 4;
         int bit = word >> 31;
         ctx->state = (word << 1) | 1;
@@ -165,7 +157,7 @@ static inline __attribute__((always_inline)) int next_2bits(DecodeContext *ctx) 
     if (state & (1u << 30)) {
         int bit0 = state >> 31;  // Read the 1 available data bit
         // Refill and read second bit
-        u32 word = read_u32_halfword_aligned(ctx->flag_ptr);
+        u32 word = read_u32_flag_stream(ctx->flag_ptr);
         ctx->flag_ptr += 4;
         int bit1 = word >> 31;
         ctx->state = (word << 1) | 1;
@@ -173,7 +165,7 @@ static inline __attribute__((always_inline)) int next_2bits(DecodeContext *ctx) 
     }
 
     // Slow path: sentinel at bit 31 (no data bits), refill and read 2 bits
-    u32 word = read_u32_halfword_aligned(ctx->flag_ptr);
+    u32 word = read_u32_flag_stream(ctx->flag_ptr);
     ctx->flag_ptr += 4;
     int bits = word >> 30;
     ctx->state = (word << 2) | 2;
@@ -934,21 +926,16 @@ GBM_ALWAYS_INLINE void decode_block_2x1(DecodeContext *ctx) {
     }
 }
 
-// Also put the main decoder loop in IWRAM for good measure?
-// It calls many IWRAM functions, so it's less critical, but looping overhead is reduced.
-static u32 IWRAM_CODE gbm_decode_frame_internal(const u8 *data, u32 offset, u16 *dst, const u16 *ref,
-                                                u32 frame_index, int obfuscated) {
-    u16 frame_len = read_u16_unaligned(data + offset);
-    u16 bit_enc = read_u16_unaligned(data + offset + 2);
-    u16 palette_bytes = read_u16_unaligned(data + offset + 4);
+static u32 IWRAM_CODE gbm_decode_frame_body_internal(const u8 *data, u32 offset, u32 body_size,
+                                                     u16 *dst, const u16 *ref, u32 frame_index,
+                                                     int obfuscated) {
+    u16 bit_enc = read_u16_unaligned(data + offset);
+    u16 palette_bytes = read_u16_unaligned(data + offset + 2);
 
     if (obfuscated) {
-        frame_len ^= frame_field_key(frame_index, 0x101u);
         bit_enc ^= frame_field_key(frame_index, 0x202u);
         palette_bytes ^= frame_field_key(frame_index, 0x303u);
     }
-
-    u32 next_offset = offset + 2 + frame_len;
 
     u16 flag_bytes = bit_enc ^ xor_key;
     trace_reset_frame_stats();
@@ -956,7 +943,7 @@ static u32 IWRAM_CODE gbm_decode_frame_internal(const u8 *data, u32 offset, u16 
     DecodeContext ctx;
     ctx.state = 0x80000000; // Initial state
     
-    u32 flag_start = offset + 6;
+    u32 flag_start = offset + 4;
     u32 flag_end = flag_start + flag_bytes;
     u32 pal_start = flag_end;
     u32 pal_end = pal_start + palette_bytes;
@@ -979,9 +966,24 @@ static u32 IWRAM_CODE gbm_decode_frame_internal(const u8 *data, u32 offset, u16 
         }
     }
 
-    trace_emit_frame_stats(flag_bytes, palette_bytes, next_offset - pal_end);
+    trace_emit_frame_stats(flag_bytes, palette_bytes,
+                           body_size > (pal_end - offset) ? body_size - (pal_end - offset) : 0);
 
-    return next_offset;
+    return offset + body_size;
+}
+
+// Also put the main decoder loop in IWRAM for good measure?
+// It calls many IWRAM functions, so it's less critical, but looping overhead is reduced.
+static u32 IWRAM_CODE gbm_decode_frame_internal(const u8 *data, u32 offset, u16 *dst, const u16 *ref,
+                                                u32 frame_index, int obfuscated) {
+    u16 frame_len = read_u16_unaligned(data + offset);
+
+    if (obfuscated) {
+        frame_len ^= frame_field_key(frame_index, 0x101u);
+    }
+
+    gbm_decode_frame_body_internal(data, offset + 2u, frame_len, dst, ref, frame_index, obfuscated);
+    return offset + 2u + frame_len;
 }
 
 u32 IWRAM_CODE gbm_decode_frame(const u8 *data, u32 offset, u16 *dst, const u16 *ref) {
@@ -991,4 +993,14 @@ u32 IWRAM_CODE gbm_decode_frame(const u8 *data, u32 offset, u16 *dst, const u16 
 u32 IWRAM_CODE gbm_decode_frame_obfuscated(const u8 *data, u32 offset, u16 *dst, const u16 *ref,
                                            u32 frame_index) {
     return gbm_decode_frame_internal(data, offset, dst, ref, frame_index, 1);
+}
+
+u32 IWRAM_CODE gbm_decode_frame_body(const u8 *data, u32 offset, u32 body_size, u16 *dst,
+                                     const u16 *ref) {
+    return gbm_decode_frame_body_internal(data, offset, body_size, dst, ref, 0, 0);
+}
+
+u32 IWRAM_CODE gbm_decode_frame_body_obfuscated(const u8 *data, u32 offset, u32 body_size,
+                                                u16 *dst, const u16 *ref, u32 frame_index) {
+    return gbm_decode_frame_body_internal(data, offset, body_size, dst, ref, frame_index, 1);
 }

@@ -18,7 +18,7 @@
 // Context for decoding a single frame
 typedef struct {
     u32 state;
-    const u8 *flag_ptr; // Current position in flag stream (must be 4-byte aligned reads)
+    const u8 *flag_ptr; // Current position in flag stream
 
     const u8 *palette_ptr; // Current position in palette stream
 
@@ -39,5 +39,8 @@ void gbm_set_version(u8 version);
 // returns the offset of the next frame, or 0 on error
 u32 gbm_decode_frame(const u8 *data, u32 offset, u16 *dst, const u16 *ref);
 u32 gbm_decode_frame_obfuscated(const u8 *data, u32 offset, u16 *dst, const u16 *ref, u32 frame_index);
+u32 gbm_decode_frame_body(const u8 *data, u32 offset, u32 body_size, u16 *dst, const u16 *ref);
+u32 gbm_decode_frame_body_obfuscated(const u8 *data, u32 offset, u32 body_size, u16 *dst,
+                                     const u16 *ref, u32 frame_index);
 
 #endif // GBM_DECODER_H

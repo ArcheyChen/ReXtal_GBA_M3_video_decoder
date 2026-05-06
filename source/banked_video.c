@@ -111,7 +111,7 @@ static bool header_is_valid(const M3VHeader* header) {
     if (header->version != 1 || header->header_size != sizeof(M3VHeader)) {
         return false;
     }
-    if ((header->flags & ~M3V_FLAG_METADATA_OBFUSCATED) != 0) {
+    if ((header->flags & ~(M3V_FLAG_METADATA_OBFUSCATED | M3V_FLAG_COMPACT_FRAMES)) != 0) {
         return false;
     }
     if (header->fps == 0 || header->frame_count == 0) {
@@ -199,6 +199,10 @@ bool banked_video_has_audio(void) {
 
 bool banked_video_is_metadata_obfuscated(void) {
     return active && (active_header.flags & M3V_FLAG_METADATA_OBFUSCATED) != 0;
+}
+
+bool banked_video_uses_compact_frames(void) {
+    return active && (active_header.flags & M3V_FLAG_COMPACT_FRAMES) != 0;
 }
 
 u32 banked_video_audio_header_offset(void) {
