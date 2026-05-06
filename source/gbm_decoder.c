@@ -59,8 +59,8 @@ static u16 xor_key = 0xD669;
 void gbm_set_version(u8 version) {
     if (version == GBM_VERSION_GEN3) {
         xor_key = 0xD6AC;
-    } else if (version == GBM_VERSION_V130) {
-        xor_key = 0x0000;  // No encryption
+    } else if (version == GBM_VERSION_V130 || version == GBM_VERSION_SC) {
+        xor_key = 0x0000;  // No frame-header XOR
     } else {
         xor_key = 0xD669;  // Gen1 default
     }
@@ -110,6 +110,14 @@ static inline u32 read_u32_unaligned(const u8 *ptr) {
     return ptr[0] | (ptr[1] << 8) | (ptr[2] << 16) | (ptr[3] << 24);
 }
 
+static inline u32 read_u32_halfword_aligned(const u8 *ptr) {
+    // GBM frame fields and frame records are 16-bit aligned. The flag stream is
+    // not always 32-bit aligned in our packed layout, but it is still safe to
+    // read as two little-endian halfwords on ARM7TDMI.
+    const u16 *h = (const u16*)ptr;
+    return (u32)h[0] | ((u32)h[1] << 16);
+}
+
 static inline u16 read_u16_unaligned(const u8 *ptr) {
     return ptr[0] | (ptr[1] << 8);
 }
@@ -130,7 +138,7 @@ static inline u16 frame_field_key(u32 frame_index, u32 salt) {
 // Critical Path: next_bit
 static inline __attribute__((always_inline)) int next_bit(DecodeContext *ctx) {
     if (ctx->state == (1u << 31)) {
-        u32 word = read_u32_unaligned(ctx->flag_ptr);
+        u32 word = read_u32_halfword_aligned(ctx->flag_ptr);
         ctx->flag_ptr += 4;
         int bit = word >> 31;
         ctx->state = (word << 1) | 1;
@@ -157,7 +165,7 @@ static inline __attribute__((always_inline)) int next_2bits(DecodeContext *ctx) 
     if (state & (1u << 30)) {
         int bit0 = state >> 31;  // Read the 1 available data bit
         // Refill and read second bit
-        u32 word = read_u32_unaligned(ctx->flag_ptr);
+        u32 word = read_u32_halfword_aligned(ctx->flag_ptr);
         ctx->flag_ptr += 4;
         int bit1 = word >> 31;
         ctx->state = (word << 1) | 1;
@@ -165,7 +173,7 @@ static inline __attribute__((always_inline)) int next_2bits(DecodeContext *ctx) 
     }
 
     // Slow path: sentinel at bit 31 (no data bits), refill and read 2 bits
-    u32 word = read_u32_unaligned(ctx->flag_ptr);
+    u32 word = read_u32_halfword_aligned(ctx->flag_ptr);
     ctx->flag_ptr += 4;
     int bits = word >> 30;
     ctx->state = (word << 2) | 2;

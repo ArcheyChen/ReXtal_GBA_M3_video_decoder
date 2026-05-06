@@ -11,6 +11,7 @@
 #define GBM_VERSION_GEN1 0x06  // XOR key 0xD669
 #define GBM_VERSION_GEN3 0x05  // XOR key 0xD6AC
 #define GBM_VERSION_V130 0x04  // No XOR (key 0x0000)
+#define GBM_VERSION_SC   0x01  // SuperCard/FilmPlay clone, no XOR
 
 #define IWRAM_CODE __attribute__((section(".iwram"), long_call))
 
@@ -31,7 +32,7 @@ typedef struct {
 } DecodeContext;
 
 // Set XOR key based on GBM version (call once after loading GBM header)
-// version: 0x06 for Gen1, 0x05 for Gen3
+// version: 0x06 for Gen1, 0x05 for Gen3, 0x04/0x01 for no-XOR variants
 void gbm_set_version(u8 version);
 
 // Initialize and decode a frame
