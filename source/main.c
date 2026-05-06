@@ -596,6 +596,9 @@ static void decode_next_frame(void) {
         const u8* frame_ptr = banked_video_frame_ptr(current_frame);
         if (frame_ptr) {
             const bool compact_frame = banked_video_uses_compact_frames();
+            // Multibank ROMs store indexed, frame_len-less bodies for compact
+            // aligned decode. A future TF/SD GBM reader must not use this path:
+            // raw GBM/GBS streams need the legacy record decoder with frame_len.
             m3_trace_value(M3_TRACE_ZONE_FRAME_BYTES,
                            compact_frame ? 0 : (frame_ptr[0] | (frame_ptr[1] << 8)));
             if (is_minute_iframe()) {

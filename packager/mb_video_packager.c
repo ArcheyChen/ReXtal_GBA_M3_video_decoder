@@ -321,6 +321,12 @@ int main(int argc, char** argv) {
     uint32_t rom_offset = video_data_start;
     for (uint32_t i = 0; i < frame_size_count; ++i) {
         const uint32_t frame_size = frame_sizes[i];
+        /*
+         * Multibank-only compact layout: strip the leading GBM frame_len and
+         * rely on M3V frame_offsets[] for random access. Do not reuse this for
+         * a future TF/SD reader that streams raw .gbm/.gbs files; that path must
+         * keep frame_len records so it can walk the file sequentially.
+         */
         rom_offset = align4(rom_offset);
         rom_offset = advance_window_bounded(rom_offset, frame_size);
         if (rom_offset + frame_size > rom_size) {
